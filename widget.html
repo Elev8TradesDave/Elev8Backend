@@ -1,0 +1,184 @@
+<!-- Elev8Trades – Local Visibility Analysis (embed-safe widget) -->
+<section id="e8-widget">
+  <style>
+    #e8-widget{--bg:#0b0c0f;--card:#121418;--accent:#2EEA7B;--ink:#F5F7FA;--sub:#a9b3ad;--border:#1c2126;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Noto Sans",sans-serif;color:var(--ink)}
+    #e8-widget .wrap{max-width:600px;margin:0 auto;padding:36px 16px;background:transparent}
+    #e8-widget .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:24px}
+    #e8-widget h1{margin:0 0 16px;font-size:2rem}
+    #e8-widget h2{margin:20px 0 10px;font-size:1.15rem;color:var(--accent)}
+    #e8-widget h3{margin:24px 0 10px;font-size:1.05rem}
+    #e8-widget .group{margin-bottom:16px}
+    #e8-widget label{display:block;font-weight:600;margin-bottom:6px}
+    #e8-widget input,#e8-widget select{width:100%;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:#0f1115;color:var(--ink);font-size:1rem;box-sizing:border-box}
+    #e8-widget .row{display:flex;gap:10px;align-items:center}
+    #e8-widget .row input{flex:1}
+    #e8-widget .geo{padding:8px 10px;background:var(--border);border:0;color:var(--sub);border-radius:8px;cursor:pointer;white-space:nowrap}
+    #e8-widget .btn{width:100%;padding:14px 16px;border:0;border-radius:10px;background:var(--accent);color:#10351f;font-weight:800;cursor:pointer;font-size:1.05rem;transition:filter .2s}
+    #e8-widget .btn:hover{filter:brightness(1.07)}
+    #e8-widget .btn[disabled]{background:#4c5550;color:#c9cfcc;cursor:not-allowed}
+    #e8-widget #results{display:none;margin-top:22px;text-align:left}
+    #e8-widget .score{font-size:3.4rem;font-weight:900;line-height:1;margin:4px 0 0}
+    #e8-widget .label{color:var(--sub)}
+    #e8-widget .ibox{background:#1a1f24;border:1px solid var(--border);border-left:4px solid var(--accent);padding:14px;border-radius:10px;margin:16px 0}
+    #e8-widget .bars{display:grid;gap:12px;margin-top:8px}
+    #e8-widget .bar{display:grid;grid-template-columns:180px 1fr 44px;gap:10px;align-items:center}
+    #e8-widget .bar .name{color:#cfd6d2;font-size:.92rem}
+    #e8-widget .track{position:relative;height:12px;background:#12171c;border:1px solid #20262c;border-radius:999px;overflow:hidden}
+    #e8-widget .fill{position:absolute;inset:0;width:0%;background:var(--accent);border-radius:999px;transition:width .7s ease}
+    #e8-widget .val{font-weight:800}
+    #e8-widget .map{border:1px solid var(--border);border-radius:12px;overflow:hidden;margin-top:14px;height:380px;display:none}
+    #e8-widget .map iframe{width:100%;height:100%;border:0}
+    #e8-widget details{margin-top:18px;border-top:1px solid var(--border);padding-top:12px}
+    #e8-widget summary{cursor:pointer;font-weight:700}
+    #e8-widget .logic{color:var(--sub);line-height:1.6;font-size:.92rem;padding-left:.6rem}
+  </style>
+
+  <div class="wrap">
+    <div class="card" role="region" aria-label="Local Visibility Analysis">
+      <h1>Local Visibility Analysis</h1>
+      <form id="e8-form" novalidate>
+        <div class="group">
+          <label for="e8-name">Business Name</label>
+          <input id="e8-name" name="businessName" type="text" placeholder="e.g., Prime Masonry LLC" required>
+        </div>
+        <div class="group">
+          <label for="e8-site">Website URL</label>
+          <input id="e8-site" name="websiteUrl" type="url" inputmode="url" placeholder="https://www.example.com" required pattern="https?://.+">
+        </div>
+        <div class="group">
+          <label for="e8-area">Primary Service Area</label>
+          <div class="row">
+            <input id="e8-area" name="serviceArea" type="text" placeholder="e.g., Paramus, NJ">
+            <button type="button" class="geo" id="e8-geo">Use My Location</button>
+          </div>
+        </div>
+        <div class="group">
+          <label for="e8-type">Business Model</label>
+          <select id="e8-type" name="businessType" required>
+            <option value="">Select your business model…</option>
+            <option value="specialty">Project-Based (e.g., Remodeling)</option>
+            <option value="maintenance">Service-Based (e.g., Lawn Care)</option>
+          </select>
+        </div>
+        <button class="btn" id="e8-run" type="submit">Analyze My Business</button>
+      </form>
+
+      <div id="e8-results" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <script>
+    (function(){
+      const API_BASE = "https://elev8-backend.vercel.app"; // ← set your backend origin
+      const $ = sel => document.querySelector(sel);
+      const form = $('#e8-form'), btn = $('#e8-run'), out = $('#e8-results');
+      const site = $('#e8-site'), area = $('#e8-area'), geoBtn = $('#e8-geo');
+      let chosenType = '';
+
+      function esc(s){return String(s||'').replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));}
+      function withTimeout(p,ms=60000){let t;const to=new Promise((_,rej)=>t=setTimeout(()=>rej(new Error('Timeout')),ms));return Promise.race([p.finally(()=>clearTimeout(t)),to]);}
+      function normalize(u){try{u=u.trim();if(!/^https?:\/\//i.test(u))u='https://'+u;const url=new URL(u);if(!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(url.hostname))throw 0;return url.toString()}catch{return ''}}
+
+      // optional: reverse geocode via backend proxy to avoid CORS & usage-policy issues
+      geoBtn.addEventListener('click',()=>{
+        if(!navigator.geolocation) return alert('Geolocation not supported.');
+        geoBtn.textContent='Finding…';
+        navigator.geolocation.getCurrentPosition(async pos=>{
+          try{
+            const url = API_BASE + `/reverse?lat=${pos.coords.latitude}&lon=${pos.coords.longitude}`;
+            const r = await withTimeout(fetch(url));
+            const j = await r.json();
+            area.value = j.cityState || '';
+          }catch(e){
+            console.warn(e); alert('Could not determine your city from location.');
+          }finally{ geoBtn.textContent='Use My Location'; }
+        },()=>{
+          alert('Location permission denied. Please type it in.'); geoBtn.textContent='Use My Location';
+        },{timeout:7000});
+      });
+
+      form.addEventListener('submit',async e=>{
+        e.preventDefault();
+        const name = $('#e8-name').value.trim();
+        const model = $('#e8-type').value;
+        chosenType = model;
+        const norm = normalize(site.value);
+        if(!norm){ alert('Please enter a valid website URL (with domain).'); return; }
+        if(!area.value && !confirm('For the most accurate competitor analysis, enter your primary service area. Continue anyway?')) return;
+
+        btn.disabled=true; btn.textContent='Running Elev8Engine analysis…';
+        out.style.display='none';
+
+        try{
+          const r = await withTimeout(fetch(API_BASE+'/analyze',{
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({businessName:name, websiteUrl:norm, businessType:model, serviceArea:area.value})
+          }), 60000);
+
+          if(!r.ok) throw new Error('Server error');
+          const data = await r.json();
+          render(data);
+        }catch(err){
+          out.innerHTML = `<p style="color:#ff6d6d"><b>Error:</b> ${esc(err.message==='Timeout'?'The analysis timed out. Please try again.':'Could not get analysis. Is the server available?')}</p>`;
+          out.style.display='block';
+          console.error(err);
+        }finally{
+          btn.disabled=false; btn.textContent='Analyze My Business';
+        }
+      });
+
+      function render(data){
+        if(!data || !data.success){
+          out.innerHTML = `<p style="color:#ff6d6d"><b>Analysis failed:</b> ${esc(data?.message||'Unknown error')}</p>`;
+          out.style.display='block'; return;
+        }
+
+        const bars = Object.entries(data.detailedScores||{}).map(([k,v])=>`
+          <div class="bar">
+            <div class="name">${esc(k)}</div>
+            <div class="track"><div class="fill" style="width:${Number(v)||0}%"></div></div>
+            <div class="val">${Number(v)||0}</div>
+          </div>`).join('');
+
+        const logic = chosenType==='specialty' ?
+          `<p>For <b>Project-Based</b> businesses we emphasize trust and depth for high-ticket jobs.</p>
+           <ul><li><b>Pain Point Resonance (20%)</b></li><li><b>Overall Rating (20%)</b></li><li><b>Review Volume (15%)</b></li><li><b>Website Health (15%)</b></li><li><b>On-Page SEO (15%)</b></li><li><b>CTA Strength (5%)</b></li></ul>`
+          :
+          `<p>For <b>Service-Based</b> businesses we emphasize speed to conversion.</p>
+           <ul><li><b>CTA Strength (25%)</b></li><li><b>Overall Rating (15%)</b></li><li><b>Review Volume (15%)</b></li><li><b>Website Health (15%)</b></li><li><b>On-Page SEO (15%)</b></li><li><b>Pain Point Resonance (5%)</b></li></ul>`;
+
+        const final = Number(data.finalScore)||0;
+        const top = esc(data.geminiAnalysis?.topPriority||'Focus your offer and make the CTA unmistakable.');
+        const sentiment = esc(data.geminiAnalysis?.reviewSentiment||'Customers care about responsiveness and clarity.');
+        const compName = esc((data.topCompetitor && data.topCompetitor.name) || 'Top Competitor');
+        const compAds = esc(data.geminiAnalysis?.competitorAdAnalysis || 'N/A');
+        const mapUrl = (data.mapEmbedUrl && data.mapEmbedUrl.startsWith('https://www.google.com/maps')) ? data.mapEmbedUrl : '';
+
+        out.innerHTML = `
+          <div class="label">Your Local Visibility Score</div>
+          <div class="score">${final}</div>
+
+          <div class="ibox"><div class="info-title"><b>Your Top Priority</b></div><p>${top}</p></div>
+          <div class="ibox"><div class="info-title"><b>Key Customer Insight (from Reviews)</b></div><p>${sentiment}</p></div>
+
+          <h2>Score Breakdown</h2>
+          <div class="bars">${bars}</div>
+
+          <h3>Your #1 Digital Competitor</h3>
+          <div class="ibox">
+            <div class="info-title"><b>${compName}</b></div>
+            <p>Google often shows this business first for your search terms in this area.</p>
+            <p><b>Their Ad Strategy:</b> ${compAds}</p>
+          </div>
+
+          <div class="map" ${mapUrl?'style="display:block"':''}>
+            ${mapUrl?`<iframe loading="lazy" allowfullscreen src="${mapUrl}"></iframe>`:''}
+          </div>
+
+          <details><summary>How we calculated your score</summary><div class="logic">${logic}</div></details>
+        `;
+        out.style.display='block';
+      }
+    })();
+  </script>
+</section>
