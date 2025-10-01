@@ -1,11 +1,11 @@
 /**
  * server.js — Elev8Trades Analysis API (Vercel-ready)
- * - Places search (+fallback), review snippets
+ * - Google Places search (+fallback) & details
  * - Optional Google Ads Transparency scrape (Puppeteer) behind flag
  * - Gemini JSON output parsing (defensive)
  * - Reverse geocoding endpoint (Maps SDK-correct)
  * - Timeouts, input validation, CORS/Helmet/Rate-limit
- * - 🔑 Exports serverless handler on Vercel; listens locally
+ * - Exports serverless handler on Vercel; listens locally
  */
 
 require('dotenv').config();
@@ -19,12 +19,12 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const puppeteer = require('puppeteer');
 
 // ---------- CONFIG ----------
-const PORT = process.env.PORT || 3001; // default 3001 for local dev
+const PORT = process.env.PORT || 3001;                 // local dev port
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const ENABLE_AD_SCRAPE = /^true$/i.test(process.env.ENABLE_AD_SCRAPE || 'false');
 
-// Required envs
+// Required envs (fail fast)
 if (!MAPS_KEY) throw new Error('Missing GOOGLE_MAPS_API_KEY');
 if (!GEMINI_KEY) throw new Error('Missing GEMINI_API_KEY');
 
@@ -32,25 +32,20 @@ if (!GEMINI_KEY) throw new Error('Missing GEMINI_API_KEY');
 const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
-app.use(cors()); // Allow all origins (OK since we're same-origin in prod)
+app.use(cors());                                        // allow all origins (fine for API)
 app.use(express.json({ limit: '200kb' }));
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
 
 // ---------- CLIENTS ----------
 const mapsClient = new Client({});
 const genAI = new GoogleGenerativeAI(GEMINI_KEY);
-// ✅ Use current model name
 const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
 
 // ---------- UTILS ----------
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
 const isHttpUrl = (u) => {
-  try {
-    const url = new URL(u);
-    return /^https?:$/.test(url.protocol);
-  } catch {
-    return false;
-  }
+  try { const url = new URL(u); return /^https?:$/.test(url.protocol); }
+  catch { return false; }
 };
 
 // Reusable Puppeteer (optional)
@@ -88,12 +83,14 @@ async function scrapeGoogleAds(domain) {
 }
 
 // ---------- HEALTH CHECK ----------
-app.get('/api/health', (_, res) => res.json({ ok: true }));
+// IMPORTANT: Do NOT prefix with /api here. Vercel mounts your Express app at /api.
+app.get('/health', (_, res) => res.json({ ok: true }));
 
 // ---------- ENDPOINT: Reverse Geocode ----------
 app.get('/reverse', async (req, res) => {
   const { lat, lon } = req.query;
   if (!lat || !lon) return res.status(400).json({ error: 'Latitude and longitude are required.' });
+
   try {
     const { data } = await mapsClient.reverseGeocode({
       params: {
@@ -172,7 +169,7 @@ app.post('/analyze', async (req, res) => {
           reviewSentiment: 'Not enough public reviews to summarize.',
         },
         topCompetitor: null,
-        // ✅ Fix malformed map URL (no keys leaked; display-only)
+        // display-only map link (no key leakage)
         mapEmbedUrl: `https://www.google.com/maps?q=${encodeURIComponent(primaryQuery)}`,
       });
     }
@@ -180,7 +177,7 @@ app.post('/analyze', async (req, res) => {
     const userBusiness = allResults[0];
     const topCompetitor = allResults.find(r => r.place_id !== userBusiness.place_id) || null;
 
-    // 2) Details for user business (rating, review count, a few review snippets)
+    // 2) Details for user business
     const detailsForUser = await mapsClient.placeDetails({
       params: {
         place_id: userBusiness.place_id,
@@ -218,7 +215,7 @@ app.post('/analyze', async (req, res) => {
       }
     }
 
-    // 4) Map embed URL (display-only; no secret)
+    // 4) Map embed URL (display-only)
     const searchQuery =
       effectiveServiceArea && effectiveServiceArea.length
         ? `${businessName} ${effectiveServiceArea}`
