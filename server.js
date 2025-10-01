@@ -16,7 +16,11 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Client } = require('@googlemaps/google-maps-services-js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const puppeteer = require('puppeteer');
+// UPDATED: Use puppeteer-core for a smaller package size
+const puppeteer = require('puppeteer-core');
+// NEW: Add the serverless chromium package
+const chromium = require('@sparticuz/chromium');
+
 
 // ---------- CONFIG ----------
 const PORT = process.env.PORT || 3001; // local dev port
@@ -45,12 +49,17 @@ const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
 const isHttpUrl = (u) => { try { const url = new URL(u); return /^https?:$/.test(url.protocol); } catch { return false; } };
 
-// Reusable Puppeteer (optional)
-const PUP_ARGS = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
+// Reusable Puppeteer (optional) - UPDATED FOR VERCEL
 let sharedBrowserPromise;
 async function getBrowser() {
   if (!sharedBrowserPromise) {
-    sharedBrowserPromise = puppeteer.launch({ headless: 'new', args: PUP_ARGS });
+    // Use the serverless-compatible chromium configuration
+    sharedBrowserPromise = puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
+    });
   }
   return sharedBrowserPromise;
 }
@@ -161,7 +170,7 @@ const analyzeHandler = async (req, res) => {
           reviewSentiment: 'Not enough public reviews to summarize.',
         },
         topCompetitor: null,
-        mapEmbedUrl: `https://www.google.com/maps?q=${encodeURIComponent(primaryQuery)}`,
+        mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS_KEY}&q=${encodeURIComponent(primaryQuery)}`,
       });
     }
 
@@ -204,21 +213,21 @@ const analyzeHandler = async (req, res) => {
 
     // 4) Map embed URL (display-only)
     const searchQuery = effectiveServiceArea && effectiveServiceArea.length ? `${businessName} ${effectiveServiceArea}` : `${businessName}`;
-    const mapEmbedUrl = `https://www.google.com/maps?q=${encodeURIComponent(searchQuery)}`;
+    const mapEmbedUrl = `https://www.google.com/maps/embed/v1/place?key=${MAPS_KEY}&q=${encodeURIComponent(searchQuery)}`;
 
     // 5) Gemini analysis (defensive JSON parse)
-    const geminiPrompt = `
+    const geminiPrompt = \`
 Analyze a local contractor:
-- Business: "${businessName}"
-- Market: "${effectiveServiceArea || 'unknown'}"
-- Model: "${businessType}"
-- Website: "${websiteUrl}"
+- Business: "\${businessName}"
+- Market: "\${effectiveServiceArea || 'unknown'}"
+- Model: "\${businessType}"
+- Website: "\${websiteUrl}"
 
 Recent public review snippets (up to 5):
-${JSON.stringify(reviewSnippets)}
+\${JSON.stringify(reviewSnippets)}
 
-Top competitor: "${topCompetitorData?.name || 'unknown'}"
-Competitor ads (first 3, if any): ${JSON.stringify(competitorAds)}
+Top competitor: "\${topCompetitorData?.name || 'unknown'}"
+Competitor ads (first 3, if any): \${JSON.stringify(competitorAds)}
 
 Return ONLY a JSON object with keys:
 {
@@ -232,7 +241,7 @@ Return ONLY a JSON object with keys:
   "competitorAdAnalysis": "<themes/offers from their ads or a suggested angle>",
   "reviewSentiment": "<biggest positive theme inferred from the review snippets>"
 }
-`.trim();
+\`.trim();
 
     const gen = await model.generateContent({
       contents: [{ role: 'user', parts: [{ text: geminiPrompt }]}],
@@ -240,7 +249,7 @@ Return ONLY a JSON object with keys:
     });
 
     let raw = gen.response.text() || '';
-    const match = raw.match(/\{[\s\S]*\}$/);
+    const match = raw.match(/{[\\s\\S]*}/);
     if (!match) throw new Error('Gemini did not return JSON.');
     let geminiAnalysis = JSON.parse(match[0]);
 
@@ -248,7 +257,7 @@ Return ONLY a JSON object with keys:
     const { finalScore, detailedScores } = calculateFinalScore(googleData, geminiAnalysis.scores || {}, businessType);
 
     // 7) Respond
-    console.log(`Analyze done in ${Date.now() - start}ms for "${businessName}"`);
+    console.log(\`Analyze done in \${Date.now() - start}ms for "\${businessName}"\`);
     return res.json({ success: true, finalScore, detailedScores, geminiAnalysis, topCompetitor: topCompetitorData, mapEmbedUrl });
   } catch (error) {
     console.error('Full analysis error:', error);

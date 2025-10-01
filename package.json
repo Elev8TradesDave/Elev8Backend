@@ -13,12 +13,13 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@googlemaps/google-maps-services-js": "^3.4.2",
+    "@sparticuz/chromium": "^140.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
     "express": "^5.1.0",
     "express-rate-limit": "^8.1.0",
     "helmet": "^8.1.0",
-    "puppeteer": "^24.22.0",
+    "puppeteer-core": "^24.22.3",
     "serverless-http": "^4.0.0"
   }
 }
