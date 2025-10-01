@@ -1,5 +1,5 @@
 /**
- * Forcing a new deployment to load keys
+ * Final working version
  * server.js — Elev8Trades Analysis API (Vercel-ready, /api/* canonical)
  * - Google Places search (+fallback) & details
  * - Optional Google Ads Transparency scrape (Puppeteer) behind flag
@@ -17,19 +17,15 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Client } = require('@googlemaps/google-maps-services-js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-// UPDATED: Use puppeteer-core for a smaller package size
 const puppeteer = require('puppeteer-core');
-// NEW: Add the serverless chromium package
 const chromium = require('@sparticuz/chromium');
 
-
 // ---------- CONFIG ----------
-const PORT = process.env.PORT || 3001; // local dev port
+const PORT = process.env.PORT || 3001;
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const ENABLE_AD_SCRAPE = /^true$/i.test(process.env.ENABLE_AD_SCRAPE || 'false');
 
-// Required envs (fail fast)
 if (!MAPS_KEY) throw new Error('Missing GOOGLE_MAPS_API_KEY');
 if (!GEMINI_KEY) throw new Error('Missing GEMINI_API_KEY');
 
@@ -37,7 +33,7 @@ if (!GEMINI_KEY) throw new Error('Missing GEMINI_API_KEY');
 const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
-app.use(cors()); // allow all origins (fine for API)
+app.use(cors());
 app.use(express.json({ limit: '200kb' }));
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
 
@@ -50,11 +46,9 @@ const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
 const isHttpUrl = (u) => { try { const url = new URL(u); return /^https?:$/.test(url.protocol); } catch { return false; } };
 
-// Reusable Puppeteer (optional) - UPDATED FOR VERCEL
 let sharedBrowserPromise;
 async function getBrowser() {
   if (!sharedBrowserPromise) {
-    // Use the serverless-compatible chromium configuration
     sharedBrowserPromise = puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
@@ -90,7 +84,7 @@ async function scrapeGoogleAds(domain) {
 // ---------- HEALTH ----------
 const healthHandler = (_, res) => res.json({ ok: true });
 app.get('/api/health', healthHandler);
-app.get('/health', healthHandler); // legacy (local/dev convenience)
+app.get('/health', healthHandler);
 
 // ---------- REVERSE GEOCODE ----------
 const reverseHandler = async (req, res) => {
@@ -120,14 +114,13 @@ const reverseHandler = async (req, res) => {
   }
 };
 app.get('/api/reverse', reverseHandler);
-app.get('/reverse', reverseHandler); // legacy
+app.get('/reverse', reverseHandler);
 
 // ---------- ANALYZE ----------
 const analyzeHandler = async (req, res) => {
   const start = Date.now();
   const { businessName, websiteUrl, businessType, serviceArea } = req.body || {};
 
-  // Basic validation
   if (!businessName || !websiteUrl || !businessType) {
     return res.status(400).json({ success: false, message: 'Missing required fields.' });
   }
@@ -143,7 +136,6 @@ const analyzeHandler = async (req, res) => {
   const fallbackQuery = `${businessName} contractor`;
 
   try {
-    // 1) Places search (+fallback)
     let placesResponse = await mapsClient.textSearch({ params: { query: primaryQuery, key: MAPS_KEY }, timeout: 6000 });
     let allResults = placesResponse.data.results || [];
     if (allResults.length === 0) {
@@ -151,24 +143,17 @@ const analyzeHandler = async (req, res) => {
       allResults = placesResponse.data.results || [];
     }
 
-    // If no Places data, return a safe baseline
     if (allResults.length === 0) {
       return res.status(200).json({
         success: true,
         finalScore: 70,
         detailedScores: {
-          'Overall Rating': 60,
-          'Review Volume': 40,
-          'Pain Point Resonance': 50,
-          'Call-to-Action Strength': 50,
-          'Website Health': 50,
-          'On-Page SEO': 50,
+          'Overall Rating': 60, 'Review Volume': 40, 'Pain Point Resonance': 50,
+          'Call-to-Action Strength': 50, 'Website Health': 50, 'On-Page SEO': 50,
         },
         geminiAnalysis: {
-          scores: {},
-          topPriority: 'Add your primary town and trade into the H1 and title tag.',
-          competitorAdAnalysis: 'No competitor detected for this query.',
-          reviewSentiment: 'Not enough public reviews to summarize.',
+          scores: {}, topPriority: 'Add your primary town and trade into the H1 and title tag.',
+          competitorAdAnalysis: 'No competitor detected for this query.', reviewSentiment: 'Not enough public reviews to summarize.',
         },
         topCompetitor: null,
         mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS_KEY}&q=${encodeURIComponent(primaryQuery)}`,
@@ -178,7 +163,6 @@ const analyzeHandler = async (req, res) => {
     const userBusiness = allResults[0];
     const topCompetitor = allResults.find(r => r.place_id !== userBusiness.place_id) || null;
 
-    // 2) Details for user business
     const detailsForUser = await mapsClient.placeDetails({
       params: { place_id: userBusiness.place_id, fields: ['name', 'rating', 'user_ratings_total', 'reviews'], key: MAPS_KEY },
       timeout: 6000,
@@ -190,7 +174,6 @@ const analyzeHandler = async (req, res) => {
     };
     const reviewSnippets = (userDetails.reviews || []).slice(0, 5).map(r => r.text || '');
 
-    // 3) Competitor website + optional Ads Transparency scrape
     let topCompetitorData = null;
     let competitorAds = [];
     if (topCompetitor) {
@@ -212,23 +195,21 @@ const analyzeHandler = async (req, res) => {
       }
     }
 
-    // 4) Map embed URL (display-only)
-    const searchQuery = effectiveServiceArea && effectiveServiceArea.length ? `${businessName} ${effectiveServiceArea}` : `${businessName}`;
+    const searchQuery = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : `${businessName}`;
     const mapEmbedUrl = `https://www.google.com/maps/embed/v1/place?key=${MAPS_KEY}&q=${encodeURIComponent(searchQuery)}`;
 
-    // 5) Gemini analysis (defensive JSON parse)
-    const geminiPrompt = \`
+    const geminiPrompt = `
 Analyze a local contractor:
-- Business: "\${businessName}"
-- Market: "\${effectiveServiceArea || 'unknown'}"
-- Model: "\${businessType}"
-- Website: "\${websiteUrl}"
+- Business: "${businessName}"
+- Market: "${effectiveServiceArea || 'unknown'}"
+- Model: "${businessType}"
+- Website: "${websiteUrl}"
 
 Recent public review snippets (up to 5):
-\${JSON.stringify(reviewSnippets)}
+${JSON.stringify(reviewSnippets)}
 
-Top competitor: "\${topCompetitorData?.name || 'unknown'}"
-Competitor ads (first 3, if any): \${JSON.stringify(competitorAds)}
+Top competitor: "${topCompetitorData?.name || 'unknown'}"
+Competitor ads (first 3, if any): ${JSON.stringify(competitorAds)}
 
 Return ONLY a JSON object with keys:
 {
@@ -242,23 +223,21 @@ Return ONLY a JSON object with keys:
   "competitorAdAnalysis": "<themes/offers from their ads or a suggested angle>",
   "reviewSentiment": "<biggest positive theme inferred from the review snippets>"
 }
-\`.trim();
+`.trim();
 
     const gen = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: geminiPrompt }]}],
+      contents: [{ role: 'user', parts: [{ text: geminiPrompt }] }],
       generationConfig: { maxOutputTokens: 1024 },
     });
 
     let raw = gen.response.text() || '';
-    const match = raw.match(/{[\\s\\S]*}/);
+    const match = raw.match(/{[\s\S]*}/);
     if (!match) throw new Error('Gemini did not return JSON.');
     let geminiAnalysis = JSON.parse(match[0]);
 
-    // 6) Scoring
     const { finalScore, detailedScores } = calculateFinalScore(googleData, geminiAnalysis.scores || {}, businessType);
 
-    // 7) Respond
-    console.log(\`Analyze done in \${Date.now() - start}ms for "\${businessName}"\`);
+    console.log(`Analyze done in ${Date.now() - start}ms for "${businessName}"`);
     return res.json({ success: true, finalScore, detailedScores, geminiAnalysis, topCompetitor: topCompetitorData, mapEmbedUrl });
   } catch (error) {
     console.error('Full analysis error:', error);
@@ -266,7 +245,7 @@ Return ONLY a JSON object with keys:
   }
 };
 app.post('/api/analyze', analyzeHandler);
-app.post('/analyze', analyzeHandler); // legacy (same handler)
+app.post('/analyze', analyzeHandler);
 
 // ---------- SCORING ----------
 function calculateFinalScore(googleData, geminiScores, businessType) {
@@ -285,21 +264,15 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
   let final;
   if (businessType === 'specialty') {
     final = Math.round(
-      allScores.rating * 0.20 +
-      allScores.reviewVolume * 0.15 +
-      allScores.painPointResonance * 0.20 +
-      allScores.ctaStrength * 0.05 +
-      allScores.websiteHealth * 0.15 +
-      allScores.onPageSEO * 0.15
+      allScores.rating * 0.20 + allScores.reviewVolume * 0.15 +
+      allScores.painPointResonance * 0.20 + allScores.ctaStrength * 0.05 +
+      allScores.websiteHealth * 0.15 + allScores.onPageSEO * 0.15
     );
   } else {
     final = Math.round(
-      allScores.rating * 0.15 +
-      allScores.reviewVolume * 0.15 +
-      allScores.painPointResonance * 0.05 +
-      allScores.ctaStrength * 0.25 +
-      allScores.websiteHealth * 0.15 +
-      allScores.onPageSEO * 0.15
+      allScores.rating * 0.15 + allScores.reviewVolume * 0.15 +
+      allScores.painPointResonance * 0.05 + allScores.ctaStrength * 0.25 +
+      allScores.websiteHealth * 0.15 + allScores.onPageSEO * 0.15
     );
   }
 
