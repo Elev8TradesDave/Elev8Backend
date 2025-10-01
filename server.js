@@ -31,17 +31,15 @@ if (!GEMINI_KEY) throw new Error('Missing GEMINI_API_KEY');
 const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
-
-// --- THIS IS THE UPDATED LINE ---
 app.use(cors()); // Allow all origins
-
 app.use(express.json({ limit: '200kb' }));
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
 
 // ---------- CLIENTS ----------
 const mapsClient = new Client({});
 const genAI = new GoogleGenerativeAI(GEMINI_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash-latest' });
+// --- THIS IS THE UPDATED LINE ---
+const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
 // ---------- UTILS ----------
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
@@ -171,7 +169,7 @@ app.post('/analyze', async (req, res) => {
           reviewSentiment: 'Not enough public reviews to summarize.',
         },
         topCompetitor: null,
-        mapEmbedUrl: `http://googleusercontent.com/maps.google.com/4{MAPS_KEY}&q=${encodeURIComponent(primaryQuery)}`,
+        mapEmbedUrl: `http://googleusercontent.com/maps.google.com/5{MAPS_KEY}&q=${encodeURIComponent(primaryQuery)}`,
       });
     }
 
@@ -225,7 +223,7 @@ app.post('/analyze', async (req, res) => {
       effectiveServiceArea && effectiveServiceArea.length
         ? `${businessName} ${effectiveServiceArea}`
         : `${businessName}`;
-    const mapEmbedUrl = `http://googleusercontent.com/maps.google.com/4{MAPS_KEY}&q=${encodeURIComponent(
+    const mapEmbedUrl = `http://googleusercontent.com/maps.google.com/5{MAPS_KEY}&q=${encodeURIComponent(
       searchQuery
     )}`;
 
