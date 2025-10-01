@@ -31,16 +31,10 @@ if (!GEMINI_KEY) throw new Error('Missing GEMINI_API_KEY');
 const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
-app.use(
-  cors({
-    origin: [
-      /elev8trades\.com$/,
-      /links\.elev8trades\.com$/,
-      /go\.highlevel\.com$/,
-      /app\.highlevel\.com$/,
-    ],
-  })
-);
+
+// --- THIS IS THE UPDATED LINE ---
+app.use(cors()); // Allow all origins
+
 app.use(express.json({ limit: '200kb' }));
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
 
@@ -177,7 +171,7 @@ app.post('/analyze', async (req, res) => {
           reviewSentiment: 'Not enough public reviews to summarize.',
         },
         topCompetitor: null,
-        mapEmbedUrl: `https://www.google.com/maps/embed/v1/search?key=${MAPS_KEY}&q=${encodeURIComponent(primaryQuery)}`,
+        mapEmbedUrl: `http://googleusercontent.com/maps.google.com/4{MAPS_KEY}&q=${encodeURIComponent(primaryQuery)}`,
       });
     }
 
@@ -231,7 +225,7 @@ app.post('/analyze', async (req, res) => {
       effectiveServiceArea && effectiveServiceArea.length
         ? `${businessName} ${effectiveServiceArea}`
         : `${businessName}`;
-    const mapEmbedUrl = `https://www.google.com/maps/embed/v1/search?key=${MAPS_KEY}&q=${encodeURIComponent(
+    const mapEmbedUrl = `http://googleusercontent.com/maps.google.com/4{MAPS_KEY}&q=${encodeURIComponent(
       searchQuery
     )}`;
 
