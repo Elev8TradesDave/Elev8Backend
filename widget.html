@@ -170,7 +170,8 @@
             resultsContainer.style.display = 'none';
 
             try {
-                const fetchPromise = fetch('https://elev8-backend.vercel.app/analyze', {
+                // --- THIS IS THE UPDATED LINE ---
+                const fetchPromise = fetch('https://elev8-backend-1m1o-gzhj7558s-david-howards-projects.vercel.app/analyze', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ businessName, websiteUrl, businessType: selectedBusinessType, serviceArea })
@@ -242,7 +243,7 @@
             const safeReviewSentiment = esc(data.geminiAnalysis.reviewSentiment);
             const safeCompetitorName = esc(data.topCompetitor?.name || 'Top Competitor');
             const safeCompetitorAnalysis = esc(data.geminiAnalysis.competitorAdAnalysis);
-            const safeMapUrl = data.mapEmbedUrl && data.mapEmbedUrl.startsWith('https://www.google.com/maps') ? data.mapEmbedUrl : 'about:blank';
+            const safeMapUrl = data.mapEmbedUrl && data.mapEmbedUrl.startsWith('https://www.google.com/maps/embed') ? data.mapEmbedUrl : 'about:blank';
 
             const resultsHTML = `
                 <div class="score-display">
@@ -294,4 +295,3 @@
     </script>
 </body>
 </html>
-
