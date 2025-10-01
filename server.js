@@ -1,10 +1,11 @@
 /**
- * server.js — Elev8Trades Analysis API (hardened)
+ * server.js — Elev8Trades Analysis API (Vercel-ready)
  * - Places search (+fallback), review snippets
  * - Optional Google Ads Transparency scrape (Puppeteer) behind flag
  * - Gemini JSON output parsing (defensive)
  * - Reverse geocoding endpoint (Maps SDK-correct)
  * - Timeouts, input validation, CORS/Helmet/Rate-limit
+ * - 🔑 Exports serverless handler on Vercel; listens locally
  */
 
 require('dotenv').config();
@@ -18,7 +19,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const puppeteer = require('puppeteer');
 
 // ---------- CONFIG ----------
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001; // default 3001 for local dev
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const ENABLE_AD_SCRAPE = /^true$/i.test(process.env.ENABLE_AD_SCRAPE || 'false');
@@ -31,15 +32,15 @@ if (!GEMINI_KEY) throw new Error('Missing GEMINI_API_KEY');
 const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
-app.use(cors()); // Allow all origins
+app.use(cors()); // Allow all origins (OK since we're same-origin in prod)
 app.use(express.json({ limit: '200kb' }));
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
 
 // ---------- CLIENTS ----------
 const mapsClient = new Client({});
 const genAI = new GoogleGenerativeAI(GEMINI_KEY);
-// --- THIS IS THE UPDATED LINE ---
-const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
+// ✅ Use current model name
+const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
 
 // ---------- UTILS ----------
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
@@ -86,21 +87,23 @@ async function scrapeGoogleAds(domain) {
   }
 }
 
+// ---------- HEALTH CHECK ----------
+app.get('/api/health', (_, res) => res.json({ ok: true }));
+
 // ---------- ENDPOINT: Reverse Geocode ----------
 app.get('/reverse', async (req, res) => {
   const { lat, lon } = req.query;
   if (!lat || !lon) return res.status(400).json({ error: 'Latitude and longitude are required.' });
   try {
-    const { data } = await mapsClient.reverseGeocode(
-      {
-        params: {
-          latlng: { lat: Number(lat), lng: Number(lon) },
-          result_type: ['locality', 'political'],
-          key: MAPS_KEY,
-        },
-        timeout: 5000,
-      }
-    );
+    const { data } = await mapsClient.reverseGeocode({
+      params: {
+        latlng: { lat: Number(lat), lng: Number(lon) },
+        result_type: ['locality', 'political'],
+        key: MAPS_KEY,
+      },
+      timeout: 5000,
+    });
+
     const result = (data.results || [])[0];
     if (!result) return res.status(404).json({ error: 'Could not find city for coordinates.' });
 
@@ -164,12 +167,13 @@ app.post('/analyze', async (req, res) => {
         },
         geminiAnalysis: {
           scores: {},
-          topPriority: 'Add your primary NJ town and trade into the H1 and title tag.',
+          topPriority: 'Add your primary town and trade into the H1 and title tag.',
           competitorAdAnalysis: 'No competitor detected for this query.',
           reviewSentiment: 'Not enough public reviews to summarize.',
         },
         topCompetitor: null,
-        mapEmbedUrl: `http://googleusercontent.com/maps.google.com/6{MAPS_KEY}&q=${encodeURIComponent(primaryQuery)}`,
+        // ✅ Fix malformed map URL (no keys leaked; display-only)
+        mapEmbedUrl: `https://www.google.com/maps?q=${encodeURIComponent(primaryQuery)}`,
       });
     }
 
@@ -177,16 +181,14 @@ app.post('/analyze', async (req, res) => {
     const topCompetitor = allResults.find(r => r.place_id !== userBusiness.place_id) || null;
 
     // 2) Details for user business (rating, review count, a few review snippets)
-    const detailsForUser = await mapsClient.placeDetails(
-      {
-        params: {
-          place_id: userBusiness.place_id,
-          fields: ['name', 'rating', 'user_ratings_total', 'reviews'],
-          key: MAPS_KEY,
-        },
-        timeout: 6000,
-      }
-    );
+    const detailsForUser = await mapsClient.placeDetails({
+      params: {
+        place_id: userBusiness.place_id,
+        fields: ['name', 'rating', 'user_ratings_total', 'reviews'],
+        key: MAPS_KEY,
+      },
+      timeout: 6000,
+    });
     const userDetails = detailsForUser.data.result || {};
     const googleData = {
       rating: userDetails.rating || 4.0,
@@ -199,12 +201,10 @@ app.post('/analyze', async (req, res) => {
     let competitorAds = [];
     if (topCompetitor) {
       try {
-        const competitorDetails = await mapsClient.placeDetails(
-          {
-            params: { place_id: topCompetitor.place_id, fields: ['name', 'website'], key: MAPS_KEY },
-            timeout: 6000,
-          }
-        );
+        const competitorDetails = await mapsClient.placeDetails({
+          params: { place_id: topCompetitor.place_id, fields: ['name', 'website'], key: MAPS_KEY },
+          timeout: 6000,
+        });
         const comp = competitorDetails.data.result || {};
         if (comp.website) {
           topCompetitorData = { name: comp.name || topCompetitor.name, website: comp.website };
@@ -218,14 +218,12 @@ app.post('/analyze', async (req, res) => {
       }
     }
 
-    // 4) Map embed URL
+    // 4) Map embed URL (display-only; no secret)
     const searchQuery =
       effectiveServiceArea && effectiveServiceArea.length
         ? `${businessName} ${effectiveServiceArea}`
         : `${businessName}`;
-    const mapEmbedUrl = `http://googleusercontent.com/maps.google.com/6{MAPS_KEY}&q=${encodeURIComponent(
-      searchQuery
-    )}`;
+    const mapEmbedUrl = `https://www.google.com/maps?q=${encodeURIComponent(searchQuery)}`;
 
     // 5) Gemini analysis (defensive JSON parse)
     const geminiPrompt = `
@@ -253,7 +251,7 @@ Return ONLY a JSON object with keys:
   "competitorAdAnalysis": "<themes/offers from their ads or a suggested angle>",
   "reviewSentiment": "<biggest positive theme inferred from the review snippets>"
 }
-    `.trim();
+`.trim();
 
     const gen = await model.generateContent({
       contents: [{ role: 'user', parts: [{ text: geminiPrompt }]}],
@@ -337,7 +335,13 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
   };
 }
 
-// ---------- START ----------
-app.listen(PORT, () => {
-  console.log(`Analysis server running on port ${PORT} (ads scrape: ${ENABLE_AD_SCRAPE ? 'on' : 'off'})`);
-});
+// ---------- Vercel serverless export vs local listen ----------
+if (process.env.VERCEL) {
+  // On Vercel, export a serverless handler (do NOT call app.listen)
+  const serverless = require('serverless-http');
+  module.exports = serverless(app);
+} else {
+  app.listen(PORT, () =>
+    console.log(`Local server on http://localhost:${PORT} (ads scrape: ${ENABLE_AD_SCRAPE ? 'on' : 'off'})`)
+  );
+}
