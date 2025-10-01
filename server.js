@@ -1,5 +1,5 @@
 /**
- * server.js — Elev8Trades Analysis API (Vercel-ready)
+ * server.js — Elev8Trades Analysis API (Vercel-ready, /api/* canonical)
  * - Google Places search (+fallback) & details
  * - Optional Google Ads Transparency scrape (Puppeteer) behind flag
  * - Gemini JSON output parsing (defensive)
@@ -19,7 +19,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 const puppeteer = require('puppeteer');
 
 // ---------- CONFIG ----------
-const PORT = process.env.PORT || 3001;                 // local dev port
+const PORT = process.env.PORT || 3001; // local dev port
 const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const ENABLE_AD_SCRAPE = /^true$/i.test(process.env.ENABLE_AD_SCRAPE || 'false');
@@ -32,7 +32,7 @@ if (!GEMINI_KEY) throw new Error('Missing GEMINI_API_KEY');
 const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
-app.use(cors());                                        // allow all origins (fine for API)
+app.use(cors()); // allow all origins (fine for API)
 app.use(express.json({ limit: '200kb' }));
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
 
@@ -43,10 +43,7 @@ const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
 
 // ---------- UTILS ----------
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
-const isHttpUrl = (u) => {
-  try { const url = new URL(u); return /^https?:$/.test(url.protocol); }
-  catch { return false; }
-};
+const isHttpUrl = (u) => { try { const url = new URL(u); return /^https?:$/.test(url.protocol); } catch { return false; } };
 
 // Reusable Puppeteer (optional)
 const PUP_ARGS = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
@@ -70,9 +67,7 @@ async function scrapeGoogleAds(domain) {
     await page.type('input[placeholder="Advertiser name, topic or website"]', domain);
     await page.keyboard.press('Enter');
     await page.waitForSelector('[data-test-id="ad-creative-card"]', { timeout: 8000 });
-    const ads = await page.$$eval('[data-test-id="ad-creative-card"]', nodes =>
-      nodes.slice(0, 3).map(n => n.innerText || '')
-    );
+    const ads = await page.$$eval('[data-test-id="ad-creative-card"]', nodes => nodes.slice(0, 3).map(n => n.innerText || ''));
     return ads;
   } catch (e) {
     console.log(`Ad scrape skipped for ${domain}: ${e.message}`);
@@ -82,15 +77,15 @@ async function scrapeGoogleAds(domain) {
   }
 }
 
-// ---------- HEALTH CHECK ----------
-// IMPORTANT: Do NOT prefix with /api here. Vercel mounts your Express app at /api.
-app.get('/health', (_, res) => res.json({ ok: true }));
+// ---------- HEALTH ----------
+const healthHandler = (_, res) => res.json({ ok: true });
+app.get('/api/health', healthHandler);
+app.get('/health', healthHandler); // legacy (local/dev convenience)
 
-// ---------- ENDPOINT: Reverse Geocode ----------
-app.get('/reverse', async (req, res) => {
+// ---------- REVERSE GEOCODE ----------
+const reverseHandler = async (req, res) => {
   const { lat, lon } = req.query;
   if (!lat || !lon) return res.status(400).json({ error: 'Latitude and longitude are required.' });
-
   try {
     const { data } = await mapsClient.reverseGeocode({
       params: {
@@ -100,7 +95,6 @@ app.get('/reverse', async (req, res) => {
       },
       timeout: 5000,
     });
-
     const result = (data.results || [])[0];
     if (!result) return res.status(404).json({ error: 'Could not find city for coordinates.' });
 
@@ -114,10 +108,12 @@ app.get('/reverse', async (req, res) => {
     console.error('Reverse geocode error:', e.message);
     return res.status(500).json({ error: 'Failed to reverse geocode.' });
   }
-});
+};
+app.get('/api/reverse', reverseHandler);
+app.get('/reverse', reverseHandler); // legacy
 
-// ---------- MAIN: Analyze ----------
-app.post('/analyze', async (req, res) => {
+// ---------- ANALYZE ----------
+const analyzeHandler = async (req, res) => {
   const start = Date.now();
   const { businessName, websiteUrl, businessType, serviceArea } = req.body || {};
 
@@ -138,18 +134,14 @@ app.post('/analyze', async (req, res) => {
 
   try {
     // 1) Places search (+fallback)
-    let placesResponse = await mapsClient.textSearch(
-      { params: { query: primaryQuery, key: MAPS_KEY }, timeout: 6000 }
-    );
+    let placesResponse = await mapsClient.textSearch({ params: { query: primaryQuery, key: MAPS_KEY }, timeout: 6000 });
     let allResults = placesResponse.data.results || [];
     if (allResults.length === 0) {
-      placesResponse = await mapsClient.textSearch(
-        { params: { query: fallbackQuery, key: MAPS_KEY }, timeout: 6000 }
-      );
+      placesResponse = await mapsClient.textSearch({ params: { query: fallbackQuery, key: MAPS_KEY }, timeout: 6000 });
       allResults = placesResponse.data.results || [];
     }
 
-    // If no Places data, return a safe baseline with map embed on the query
+    // If no Places data, return a safe baseline
     if (allResults.length === 0) {
       return res.status(200).json({
         success: true,
@@ -169,7 +161,6 @@ app.post('/analyze', async (req, res) => {
           reviewSentiment: 'Not enough public reviews to summarize.',
         },
         topCompetitor: null,
-        // display-only map link (no key leakage)
         mapEmbedUrl: `https://www.google.com/maps?q=${encodeURIComponent(primaryQuery)}`,
       });
     }
@@ -179,11 +170,7 @@ app.post('/analyze', async (req, res) => {
 
     // 2) Details for user business
     const detailsForUser = await mapsClient.placeDetails({
-      params: {
-        place_id: userBusiness.place_id,
-        fields: ['name', 'rating', 'user_ratings_total', 'reviews'],
-        key: MAPS_KEY,
-      },
+      params: { place_id: userBusiness.place_id, fields: ['name', 'rating', 'user_ratings_total', 'reviews'], key: MAPS_KEY },
       timeout: 6000,
     });
     const userDetails = detailsForUser.data.result || {};
@@ -216,10 +203,7 @@ app.post('/analyze', async (req, res) => {
     }
 
     // 4) Map embed URL (display-only)
-    const searchQuery =
-      effectiveServiceArea && effectiveServiceArea.length
-        ? `${businessName} ${effectiveServiceArea}`
-        : `${businessName}`;
+    const searchQuery = effectiveServiceArea && effectiveServiceArea.length ? `${businessName} ${effectiveServiceArea}` : `${businessName}`;
     const mapEmbedUrl = `https://www.google.com/maps?q=${encodeURIComponent(searchQuery)}`;
 
     // 5) Gemini analysis (defensive JSON parse)
@@ -261,27 +245,18 @@ Return ONLY a JSON object with keys:
     let geminiAnalysis = JSON.parse(match[0]);
 
     // 6) Scoring
-    const { finalScore, detailedScores } = calculateFinalScore(
-      googleData,
-      geminiAnalysis.scores || {},
-      businessType
-    );
+    const { finalScore, detailedScores } = calculateFinalScore(googleData, geminiAnalysis.scores || {}, businessType);
 
     // 7) Respond
     console.log(`Analyze done in ${Date.now() - start}ms for "${businessName}"`);
-    return res.json({
-      success: true,
-      finalScore,
-      detailedScores,
-      geminiAnalysis,
-      topCompetitor: topCompetitorData,
-      mapEmbedUrl,
-    });
+    return res.json({ success: true, finalScore, detailedScores, geminiAnalysis, topCompetitor: topCompetitorData, mapEmbedUrl });
   } catch (error) {
     console.error('Full analysis error:', error);
     return res.status(500).json({ success: false, message: 'An error occurred during the analysis.' });
   }
-});
+};
+app.post('/api/analyze', analyzeHandler);
+app.post('/analyze', analyzeHandler); // legacy (same handler)
 
 // ---------- SCORING ----------
 function calculateFinalScore(googleData, geminiScores, businessType) {
@@ -308,7 +283,6 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
       allScores.onPageSEO * 0.15
     );
   } else {
-    // maintenance / service-based
     final = Math.round(
       allScores.rating * 0.15 +
       allScores.reviewVolume * 0.15 +
@@ -334,7 +308,6 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
 
 // ---------- Vercel serverless export vs local listen ----------
 if (process.env.VERCEL) {
-  // On Vercel, export a serverless handler (do NOT call app.listen)
   const serverless = require('serverless-http');
   module.exports = serverless(app);
 } else {
