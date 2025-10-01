@@ -1,4 +1,5 @@
-// Forcing a new deployment to load keys/**
+/**
+ * Forcing a new deployment to load keys
  * server.js — Elev8Trades Analysis API (Vercel-ready, /api/* canonical)
  * - Google Places search (+fallback) & details
  * - Optional Google Ads Transparency scrape (Puppeteer) behind flag
