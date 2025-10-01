@@ -1,12 +1,6 @@
 /**
  * Final working version
  * server.js — Elev8Trades Analysis API (Vercel-ready, /api/* canonical)
- * - Google Places search (+fallback) & details
- * - Optional Google Ads Transparency scrape (Puppeteer) behind flag
- * - Gemini JSON output parsing (defensive)
- * - Reverse geocoding endpoint (Maps SDK-correct)
- * - Timeouts, input validation, CORS/Helmet/Rate-limit
- * - Exports serverless handler on Vercel; listens locally
  */
 
 require('dotenv').config();
@@ -34,8 +28,20 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
 app.use(cors());
+app.options('*', cors()); // ensure preflight handled
 app.use(express.json({ limit: '200kb' }));
-app.use(rateLimit({ windowMs: 60_000, max: 60 }));
+app.use(
+  rateLimit({
+    windowMs: 60_000,
+    max: 60,
+    // make it resilient on serverless where req.ip can be undefined
+    keyGenerator: (req) =>
+      (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
+      req.ip ||
+      (req.socket && req.socket.remoteAddress) ||
+      'unknown',
+  })
+);
 
 // ---------- CLIENTS ----------
 const mapsClient = new Client({});
@@ -44,7 +50,14 @@ const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
 
 // ---------- UTILS ----------
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
-const isHttpUrl = (u) => { try { const url = new URL(u); return /^https?:$/.test(url.protocol); } catch { return false; } };
+const isHttpUrl = (u) => {
+  try {
+    const url = new URL(u);
+    return /^https?:$/.test(url.protocol);
+  } catch {
+    return false;
+  }
+};
 
 let sharedBrowserPromise;
 async function getBrowser() {
@@ -66,12 +79,19 @@ async function scrapeGoogleAds(domain) {
     const browser = await getBrowser();
     page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (compatible; Elev8Engine/1.0)');
-    await page.goto('https://adstransparency.google.com/', { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await page.waitForSelector('input[placeholder="Advertiser name, topic or website"]', { timeout: 6000 });
+    await page.goto('https://adstransparency.google.com/', {
+      waitUntil: 'domcontentloaded',
+      timeout: 15000,
+    });
+    await page.waitForSelector('input[placeholder="Advertiser name, topic or website"]', {
+      timeout: 6000,
+    });
     await page.type('input[placeholder="Advertiser name, topic or website"]', domain);
     await page.keyboard.press('Enter');
     await page.waitForSelector('[data-test-id="ad-creative-card"]', { timeout: 8000 });
-    const ads = await page.$$eval('[data-test-id="ad-creative-card"]', nodes => nodes.slice(0, 3).map(n => n.innerText || ''));
+    const ads = await page.$$eval('[data-test-id="ad-creative-card"]', (nodes) =>
+      nodes.slice(0, 3).map((n) => n.innerText || '')
+    );
     return ads;
   } catch (e) {
     console.log(`Ad scrape skipped for ${domain}: ${e.message}`);
@@ -102,7 +122,8 @@ const reverseHandler = async (req, res) => {
     const result = (data.results || [])[0];
     if (!result) return res.status(404).json({ error: 'Could not find city for coordinates.' });
 
-    let city = '', state = '';
+    let city = '',
+      state = '';
     for (const c of result.address_components) {
       if (c.types.includes('locality')) city = c.long_name;
       if (c.types.includes('administrative_area_level_1')) state = c.short_name;
@@ -136,10 +157,16 @@ const analyzeHandler = async (req, res) => {
   const fallbackQuery = `${businessName} contractor`;
 
   try {
-    let placesResponse = await mapsClient.textSearch({ params: { query: primaryQuery, key: MAPS_KEY }, timeout: 6000 });
+    let placesResponse = await mapsClient.textSearch({
+      params: { query: primaryQuery, key: MAPS_KEY },
+      timeout: 6000,
+    });
     let allResults = placesResponse.data.results || [];
     if (allResults.length === 0) {
-      placesResponse = await mapsClient.textSearch({ params: { query: fallbackQuery, key: MAPS_KEY }, timeout: 6000 });
+      placesResponse = await mapsClient.textSearch({
+        params: { query: fallbackQuery, key: MAPS_KEY },
+        timeout: 6000,
+      });
       allResults = placesResponse.data.results || [];
     }
 
@@ -148,12 +175,18 @@ const analyzeHandler = async (req, res) => {
         success: true,
         finalScore: 70,
         detailedScores: {
-          'Overall Rating': 60, 'Review Volume': 40, 'Pain Point Resonance': 50,
-          'Call-to-Action Strength': 50, 'Website Health': 50, 'On-Page SEO': 50,
+          'Overall Rating': 60,
+          'Review Volume': 40,
+          'Pain Point Resonance': 50,
+          'Call-to-Action Strength': 50,
+          'Website Health': 50,
+          'On-Page SEO': 50,
         },
         geminiAnalysis: {
-          scores: {}, topPriority: 'Add your primary town and trade into the H1 and title tag.',
-          competitorAdAnalysis: 'No competitor detected for this query.', reviewSentiment: 'Not enough public reviews to summarize.',
+          scores: {},
+          topPriority: 'Add your primary town and trade into the H1 and title tag.',
+          competitorAdAnalysis: 'No competitor detected for this query.',
+          reviewSentiment: 'Not enough public reviews to summarize.',
         },
         topCompetitor: null,
         mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS_KEY}&q=${encodeURIComponent(primaryQuery)}`,
@@ -161,7 +194,7 @@ const analyzeHandler = async (req, res) => {
     }
 
     const userBusiness = allResults[0];
-    const topCompetitor = allResults.find(r => r.place_id !== userBusiness.place_id) || null;
+    const topCompetitor = allResults.find((r) => r.place_id !== userBusiness.place_id) || null;
 
     const detailsForUser = await mapsClient.placeDetails({
       params: { place_id: userBusiness.place_id, fields: ['name', 'rating', 'user_ratings_total', 'reviews'], key: MAPS_KEY },
@@ -172,7 +205,7 @@ const analyzeHandler = async (req, res) => {
       rating: userDetails.rating || 4.0,
       reviewCount: userDetails.user_ratings_total || 0,
     };
-    const reviewSnippets = (userDetails.reviews || []).slice(0, 5).map(r => r.text || '');
+    const reviewSnippets = (userDetails.reviews || []).slice(0, 5).map((r) => r.text || '');
 
     let topCompetitorData = null;
     let competitorAds = [];
@@ -231,14 +264,21 @@ Return ONLY a JSON object with keys:
     });
 
     let raw = gen.response.text() || '';
-    const match = raw.match(/{[\s\S]*}/);
+    const match = raw.match(/{[\s\S]*}/); // correct cross-newline JSON grab
     if (!match) throw new Error('Gemini did not return JSON.');
     let geminiAnalysis = JSON.parse(match[0]);
 
     const { finalScore, detailedScores } = calculateFinalScore(googleData, geminiAnalysis.scores || {}, businessType);
 
     console.log(`Analyze done in ${Date.now() - start}ms for "${businessName}"`);
-    return res.json({ success: true, finalScore, detailedScores, geminiAnalysis, topCompetitor: topCompetitorData, mapEmbedUrl });
+    return res.json({
+      success: true,
+      finalScore,
+      detailedScores,
+      geminiAnalysis,
+      topCompetitor: topCompetitorData,
+      mapEmbedUrl,
+    });
   } catch (error) {
     console.error('Full analysis error:', error);
     return res.status(500).json({ success: false, message: 'An error occurred during the analysis.' });
@@ -250,7 +290,7 @@ app.post('/analyze', analyzeHandler);
 // ---------- SCORING ----------
 function calculateFinalScore(googleData, geminiScores, businessType) {
   const ratingScore = clampPct((Number(googleData.rating || 0) / 5) * 100);
-  const reviewScore = clampPct(Math.min((Number(googleData.reviewCount || 0) / 150), 1) * 100);
+  const reviewScore = clampPct(Math.min(Number(googleData.reviewCount || 0) / 150, 1) * 100);
 
   const allScores = {
     rating: ratingScore,
@@ -264,15 +304,21 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
   let final;
   if (businessType === 'specialty') {
     final = Math.round(
-      allScores.rating * 0.20 + allScores.reviewVolume * 0.15 +
-      allScores.painPointResonance * 0.20 + allScores.ctaStrength * 0.05 +
-      allScores.websiteHealth * 0.15 + allScores.onPageSEO * 0.15
+      allScores.rating * 0.2 +
+        allScores.reviewVolume * 0.15 +
+        allScores.painPointResonance * 0.2 +
+        allScores.ctaStrength * 0.05 +
+        allScores.websiteHealth * 0.15 +
+        allScores.onPageSEO * 0.15
     );
   } else {
     final = Math.round(
-      allScores.rating * 0.15 + allScores.reviewVolume * 0.15 +
-      allScores.painPointResonance * 0.05 + allScores.ctaStrength * 0.25 +
-      allScores.websiteHealth * 0.15 + allScores.onPageSEO * 0.15
+      allScores.rating * 0.15 +
+        allScores.reviewVolume * 0.15 +
+        allScores.painPointResonance * 0.05 +
+        allScores.ctaStrength * 0.25 +
+        allScores.websiteHealth * 0.15 +
+        allScores.onPageSEO * 0.15
     );
   }
 
