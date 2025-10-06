@@ -1,5 +1,5 @@
 /**
- * Final working version (patched)
+ * Final working version (IPv6-safe)
  * server.js — Elev8Trades Analysis API (Vercel-ready, /api/* canonical)
  */
 
@@ -8,7 +8,9 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
+// Use the helper to be IPv6-safe:
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = require('express-rate-limit');
 const { Client } = require('@googlemaps/google-maps-services-js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const puppeteer = require('puppeteer-core');
@@ -16,41 +18,43 @@ const chromium = require('@sparticuz/chromium');
 
 // ---------- CONFIG ----------
 const PORT = process.env.PORT || 3001;
-const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
-const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const ENABLE_AD_SCRAPE = /^true$/i.test(process.env.ENABLE_AD_SCRAPE || 'false');
-
-// ❌ DO NOT throw at import-time in serverless (causes Lambda cold-start crash)
-// if (!MAPS_KEY) throw new Error('Missing GOOGLE_MAPS_API_KEY');
-// if (!GEMINI_KEY) throw new Error('Missing GEMINI_API_KEY');
 
 // ---------- APP ----------
 const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
 
-// CORS: apply to all routes (Express 5: avoid '*' pattern)
+// CORS (apply globally)
 app.use(cors());
-// If you specifically want to handle OPTIONS, use '/*' or a regex, but not '*':
+// If you want to explicitly handle OPTIONS, use a concrete path pattern, not '*':
 // app.options('/*', cors());
 
 app.use(express.json({ limit: '200kb' }));
 
+// IPv6-safe rate limiting
 app.use(
   rateLimit({
     windowMs: 60_000,
     max: 60,
-    keyGenerator: (req) =>
-      (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
-      req.ip ||
-      (req.socket && req.socket.remoteAddress) ||
-      'unknown',
+    keyGenerator: ipKeyGenerator, // <-- fixes the IPv6 warning
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
   })
 );
 
+// Tiny root endpoint so the preview URL isn't a blank spinner
+app.get('/', (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    name: 'Elev8Trades Backend',
+    docs: ['/api/health', '/api/reverse?lat=40.7&lon=-74', '/api/analyze'],
+  });
+});
+
 // Stop browsers from hitting the lambda for icons
-app.use('/favicon.ico', (req, res) => res.status(204).end());
-app.use('/favicon.png', (req, res) => res.status(204).end());
+app.use('/favicon.ico', (_req, res) => res.status(204).end());
+app.use('/favicon.png', (_req, res) => res.status(204).end());
 
 // ---------- HEALTH (doesn't require keys) ----------
 const healthHandler = (_req, res) =>
@@ -64,7 +68,6 @@ app.get('/api/health', healthHandler);
 app.get('/health', healthHandler);
 
 // ---------- CONFIG GUARD (after health) ----------
-// Prevents runtime work if keys are missing, but doesn't crash the process.
 app.use((req, res, next) => {
   if (!process.env.GOOGLE_MAPS_API_KEY || !process.env.GEMINI_API_KEY) {
     console.error('Missing required API keys');
@@ -147,7 +150,8 @@ const reverseHandler = async (req, res) => {
     const result = (data.results || [])[0];
     if (!result) return res.status(404).json({ error: 'Could not find city for coordinates.' });
 
-    let city = '', state = '';
+    let city = '',
+      state = '';
     for (const c of result.address_components) {
       if (c.types.includes('locality')) city = c.long_name;
       if (c.types.includes('administrative_area_level_1')) state = c.short_name;
@@ -176,8 +180,7 @@ const analyzeHandler = async (req, res) => {
     return res.status(400).json({ success: false, message: 'Invalid businessType' });
   }
 
-  const MAPS = process.env.GOOGLE_MAPS_API_KEY; // read at runtime
-  const GEMINI = process.env.GEMINI_API_KEY;
+  const MAPS = process.env.GOOGLE_MAPS_API_KEY;
 
   const effectiveServiceArea = (serviceArea || '').toString().trim();
   const primaryQuery = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName;
@@ -224,7 +227,11 @@ const analyzeHandler = async (req, res) => {
     const topCompetitor = allResults.find((r) => r.place_id !== userBusiness.place_id) || null;
 
     const detailsForUser = await mapsClient.placeDetails({
-      params: { place_id: userBusiness.place_id, fields: ['name', 'rating', 'user_ratings_total', 'reviews'], key: MAPS },
+      params: {
+        place_id: userBusiness.place_id,
+        fields: ['name', 'rating', 'user_ratings_total', 'reviews'],
+        key: MAPS,
+      },
       timeout: 6000,
     });
     const userDetails = detailsForUser.data.result || {};
@@ -295,7 +302,11 @@ Return ONLY a JSON object with keys:
     if (!match) throw new Error('Gemini did not return JSON.');
     let geminiAnalysis = JSON.parse(match[0]);
 
-    const { finalScore, detailedScores } = calculateFinalScore(googleData, geminiAnalysis.scores || {}, businessType);
+    const { finalScore, detailedScores } = calculateFinalScore(
+      googleData,
+      geminiAnalysis.scores || {},
+      businessType
+    );
 
     console.log(`Analyze done in ${Date.now() - start}ms for "${businessName}"`);
     return res.json({
@@ -368,6 +379,8 @@ if (process.env.VERCEL) {
   module.exports = serverless(app);
 } else {
   app.listen(PORT, () =>
-    console.log(`Local server on http://localhost:${PORT} (ads scrape: ${ENABLE_AD_SCRAPE ? 'on' : 'off'})`)
+    console.log(
+      `Local server on http://localhost:${PORT} (ads scrape: ${ENABLE_AD_SCRAPE ? 'on' : 'off'})`
+    )
   );
 }
