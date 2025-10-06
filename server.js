@@ -1,5 +1,5 @@
 /**
- * Final working version
+ * Final working version (patched)
  * server.js — Elev8Trades Analysis API (Vercel-ready, /api/* canonical)
  */
 
@@ -20,21 +20,26 @@ const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const GEMINI_KEY = process.env.GEMINI_API_KEY;
 const ENABLE_AD_SCRAPE = /^true$/i.test(process.env.ENABLE_AD_SCRAPE || 'false');
 
-if (!MAPS_KEY) throw new Error('Missing GOOGLE_MAPS_API_KEY');
-if (!GEMINI_KEY) throw new Error('Missing GEMINI_API_KEY');
+// ❌ DO NOT throw at import-time in serverless (causes Lambda cold-start crash)
+// if (!MAPS_KEY) throw new Error('Missing GOOGLE_MAPS_API_KEY');
+// if (!GEMINI_KEY) throw new Error('Missing GEMINI_API_KEY');
 
 // ---------- APP ----------
 const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
+
+// CORS: apply to all routes (Express 5: avoid '*' pattern)
 app.use(cors());
-app.options('*', cors()); // ensure preflight handled
+// If you specifically want to handle OPTIONS, use '/*' or a regex, but not '*':
+// app.options('/*', cors());
+
 app.use(express.json({ limit: '200kb' }));
+
 app.use(
   rateLimit({
     windowMs: 60_000,
     max: 60,
-    // make it resilient on serverless where req.ip can be undefined
     keyGenerator: (req) =>
       (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
       req.ip ||
@@ -43,9 +48,34 @@ app.use(
   })
 );
 
+// Stop browsers from hitting the lambda for icons
+app.use('/favicon.ico', (req, res) => res.status(204).end());
+app.use('/favicon.png', (req, res) => res.status(204).end());
+
+// ---------- HEALTH (doesn't require keys) ----------
+const healthHandler = (_req, res) =>
+  res.json({
+    ok: true,
+    mapsKeyPresent: Boolean(process.env.GOOGLE_MAPS_API_KEY),
+    geminiKeyPresent: Boolean(process.env.GEMINI_API_KEY),
+    env: process.env.NODE_ENV || 'unknown',
+  });
+app.get('/api/health', healthHandler);
+app.get('/health', healthHandler);
+
+// ---------- CONFIG GUARD (after health) ----------
+// Prevents runtime work if keys are missing, but doesn't crash the process.
+app.use((req, res, next) => {
+  if (!process.env.GOOGLE_MAPS_API_KEY || !process.env.GEMINI_API_KEY) {
+    console.error('Missing required API keys');
+    return res.status(500).json({ error: 'Server configuration missing API keys' });
+  }
+  next();
+});
+
 // ---------- CLIENTS ----------
 const mapsClient = new Client({});
-const genAI = new GoogleGenerativeAI(GEMINI_KEY);
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
 
 // ---------- UTILS ----------
@@ -101,11 +131,6 @@ async function scrapeGoogleAds(domain) {
   }
 }
 
-// ---------- HEALTH ----------
-const healthHandler = (_, res) => res.json({ ok: true });
-app.get('/api/health', healthHandler);
-app.get('/health', healthHandler);
-
 // ---------- REVERSE GEOCODE ----------
 const reverseHandler = async (req, res) => {
   const { lat, lon } = req.query;
@@ -115,15 +140,14 @@ const reverseHandler = async (req, res) => {
       params: {
         latlng: { lat: Number(lat), lng: Number(lon) },
         result_type: ['locality', 'political'],
-        key: MAPS_KEY,
+        key: process.env.GOOGLE_MAPS_API_KEY,
       },
       timeout: 5000,
     });
     const result = (data.results || [])[0];
     if (!result) return res.status(404).json({ error: 'Could not find city for coordinates.' });
 
-    let city = '',
-      state = '';
+    let city = '', state = '';
     for (const c of result.address_components) {
       if (c.types.includes('locality')) city = c.long_name;
       if (c.types.includes('administrative_area_level_1')) state = c.short_name;
@@ -152,19 +176,22 @@ const analyzeHandler = async (req, res) => {
     return res.status(400).json({ success: false, message: 'Invalid businessType' });
   }
 
+  const MAPS = process.env.GOOGLE_MAPS_API_KEY; // read at runtime
+  const GEMINI = process.env.GEMINI_API_KEY;
+
   const effectiveServiceArea = (serviceArea || '').toString().trim();
   const primaryQuery = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName;
   const fallbackQuery = `${businessName} contractor`;
 
   try {
     let placesResponse = await mapsClient.textSearch({
-      params: { query: primaryQuery, key: MAPS_KEY },
+      params: { query: primaryQuery, key: MAPS },
       timeout: 6000,
     });
     let allResults = placesResponse.data.results || [];
     if (allResults.length === 0) {
       placesResponse = await mapsClient.textSearch({
-        params: { query: fallbackQuery, key: MAPS_KEY },
+        params: { query: fallbackQuery, key: MAPS },
         timeout: 6000,
       });
       allResults = placesResponse.data.results || [];
@@ -189,7 +216,7 @@ const analyzeHandler = async (req, res) => {
           reviewSentiment: 'Not enough public reviews to summarize.',
         },
         topCompetitor: null,
-        mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS_KEY}&q=${encodeURIComponent(primaryQuery)}`,
+        mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(primaryQuery)}`,
       });
     }
 
@@ -197,7 +224,7 @@ const analyzeHandler = async (req, res) => {
     const topCompetitor = allResults.find((r) => r.place_id !== userBusiness.place_id) || null;
 
     const detailsForUser = await mapsClient.placeDetails({
-      params: { place_id: userBusiness.place_id, fields: ['name', 'rating', 'user_ratings_total', 'reviews'], key: MAPS_KEY },
+      params: { place_id: userBusiness.place_id, fields: ['name', 'rating', 'user_ratings_total', 'reviews'], key: MAPS },
       timeout: 6000,
     });
     const userDetails = detailsForUser.data.result || {};
@@ -212,7 +239,7 @@ const analyzeHandler = async (req, res) => {
     if (topCompetitor) {
       try {
         const competitorDetails = await mapsClient.placeDetails({
-          params: { place_id: topCompetitor.place_id, fields: ['name', 'website'], key: MAPS_KEY },
+          params: { place_id: topCompetitor.place_id, fields: ['name', 'website'], key: MAPS },
           timeout: 6000,
         });
         const comp = competitorDetails.data.result || {};
@@ -229,7 +256,7 @@ const analyzeHandler = async (req, res) => {
     }
 
     const searchQuery = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : `${businessName}`;
-    const mapEmbedUrl = `https://www.google.com/maps/embed/v1/place?key=${MAPS_KEY}&q=${encodeURIComponent(searchQuery)}`;
+    const mapEmbedUrl = `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(searchQuery)}`;
 
     const geminiPrompt = `
 Analyze a local contractor:
@@ -264,7 +291,7 @@ Return ONLY a JSON object with keys:
     });
 
     let raw = gen.response.text() || '';
-    const match = raw.match(/{[\s\S]*}/); // correct cross-newline JSON grab
+    const match = raw.match(/{[\s\S]*}/);
     if (!match) throw new Error('Gemini did not return JSON.');
     let geminiAnalysis = JSON.parse(match[0]);
 
