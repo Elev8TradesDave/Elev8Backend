@@ -29,13 +29,14 @@ app.use(cors());
 // Body parsing
 app.use(express.json({ limit: '200kb' }));
 
-// Rate limiting (no custom keyGenerator => passes v7 validation and supports IPv6)
+// Rate limiting with custom keyGenerator for Vercel
 app.use(
   rateLimit({
     windowMs: 60_000,
     max: 60,
     standardHeaders: true,
     legacyHeaders: false,
+    keyGenerator: (req) => req.headers['x-forwarded-for'] || req.ip || 'unknown',
   })
 );
 
@@ -101,14 +102,14 @@ async function scrapeGoogleAds(domain) {
     await page.setUserAgent('Mozilla/5.0 (compatible; Elev8Engine/1.0)');
     await page.goto('https://adstransparency.google.com/', {
       waitUntil: 'domcontentloaded',
-      timeout: 15000,
+      timeout: 5000,
     });
     await page.waitForSelector('input[placeholder="Advertiser name, topic or website"]', {
-      timeout: 6000,
+      timeout: 5000,
     });
     await page.type('input[placeholder="Advertiser name, topic or website"]', domain);
     await page.keyboard.press('Enter');
-    await page.waitForSelector('[data-test-id="ad-creative-card"]', { timeout: 8000 });
+    await page.waitForSelector('[data-test-id="ad-creative-card"]', { timeout: 5000 });
     const ads = await page.$$eval('[data-test-id="ad-creative-card"]', (nodes) =>
       nodes.slice(0, 3).map((n) => n.innerText || '')
     );
@@ -175,13 +176,13 @@ const analyzeHandler = async (req, res) => {
   try {
     let placesResponse = await mapsClient.textSearch({
       params: { query: primaryQuery, key: MAPS },
-      timeout: 6000,
+      timeout: 5000,
     });
     let allResults = placesResponse.data.results || [];
     if (allResults.length === 0) {
       placesResponse = await mapsClient.textSearch({
         params: { query: fallbackQuery, key: MAPS },
-        timeout: 6000,
+        timeout: 5000,
       });
       allResults = placesResponse.data.results || [];
     }
@@ -214,7 +215,7 @@ const analyzeHandler = async (req, res) => {
 
     const detailsForUser = await mapsClient.placeDetails({
       params: { place_id: userBusiness.place_id, fields: ['name', 'rating', 'user_ratings_total', 'reviews'], key: MAPS },
-      timeout: 6000,
+      timeout: 5000,
     });
     const userDetails = detailsForUser.data.result || {};
     const googleData = {
@@ -229,7 +230,7 @@ const analyzeHandler = async (req, res) => {
       try {
         const competitorDetails = await mapsClient.placeDetails({
           params: { place_id: topCompetitor.place_id, fields: ['name', 'website'], key: MAPS },
-          timeout: 6000,
+          timeout: 5000,
         });
         const comp = competitorDetails.data.result || {};
         if (comp.website) {
