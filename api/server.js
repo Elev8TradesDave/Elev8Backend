@@ -1,6 +1,6 @@
 /**
  * Final working version (IPv6-safe, Vercel-ready)
- * server.js — Elev8Trades Analysis API
+ * api/server.js — Elev8Trades Analysis API
  */
 
 require('dotenv').config();
@@ -24,7 +24,7 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
 
-// CORS for all routes (avoid Express 5 "*" wildcard)
+// CORS for all routes
 app.use(cors());
 
 // Body parsing
@@ -299,7 +299,11 @@ Return ONLY a JSON object with keys:
     if (!match) throw new Error('Gemini did not return JSON.');
     let geminiAnalysis = JSON.parse(match[0]);
 
-    const { finalScore, detailedScores } = calculateFinalScore(googleData, geminiAnalysis.scores || {}, businessType);
+    const { finalScore, detailedScores } = calculateFinalScore(
+      googleData,
+      geminiAnalysis.scores || {},
+      businessType
+    );
 
     console.log(`Analyze done in ${Date.now() - start}ms for "${businessName}"`);
     return res.json({
@@ -380,4 +384,3 @@ if (!process.env.VERCEL) {
     );
   });
 }
-
