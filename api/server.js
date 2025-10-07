@@ -366,14 +366,18 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
   };
 }
 
-// ---------- Vercel serverless export vs local listen ----------
-if (process.env.VERCEL) {
-  const serverless = require('serverless-http');
-  module.exports = serverless(app);
-} else {
-  app.listen(PORT, () =>
+// ---------- Vercel serverless export + local listen ----------
+const serverless = require('serverless-http');
+
+// Always export a handler so Vercel can invoke it
+module.exports = serverless(app);
+
+// Only start an HTTP listener when running locally
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
     console.log(
       `Local server on http://localhost:${PORT} (ads scrape: ${ENABLE_AD_SCRAPE ? 'on' : 'off'})`
-    )
-  );
+    );
+  });
 }
+
