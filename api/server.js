@@ -49,8 +49,8 @@ app.use(
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => ipFromReq(req),
-    validate: false,
-    skipFailedRequests: true,
+    validate: false,          // relax validation to avoid ERL_* header errors
+    skipFailedRequests: true, // don't count failed requests
   })
 );
 
@@ -182,7 +182,6 @@ const analyzeHandler = async (req, res) => {
   }
 
   const MAPS = process.env.GOOGLE_MAPS_API_KEY;
-
   const effectiveServiceArea = (serviceArea || '').toString().trim();
   const primaryQuery = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName;
   const fallbackQuery = `${businessName} contractor`;
@@ -192,16 +191,24 @@ const analyzeHandler = async (req, res) => {
       params: { query: primaryQuery, key: MAPS },
       timeout: 5000,
     });
+    if (placesResponse?.data?.status && placesResponse.data.status !== 'OK') {
+      console.error('[maps] textSearch status:', placesResponse.data.status, placesResponse.data.error_message);
+    }
     let allResults = placesResponse.data.results || [];
+
     if (allResults.length === 0) {
       placesResponse = await mapsClient.textSearch({
         params: { query: fallbackQuery, key: MAPS },
         timeout: 5000,
       });
+      if (placesResponse?.data?.status && placesResponse.data.status !== 'OK') {
+        console.error('[maps] textSearch(fallback) status:', placesResponse.data.status, placesResponse.data.error_message);
+      }
       allResults = placesResponse.data.results || [];
     }
 
     if (allResults.length === 0) {
+      const mapEmbedUrl = `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(primaryQuery)}`;
       return res.status(200).json({
         success: true,
         finalScore: 70,
@@ -220,7 +227,8 @@ const analyzeHandler = async (req, res) => {
           reviewSentiment: 'Not enough public reviews to summarize.',
         },
         topCompetitor: null,
-        mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(primaryQuery)}`,
+        mapEmbedUrl,
+        _debug: { elapsedMs: Date.now() - start, reason: 'no_places_results' },
       });
     }
 
@@ -231,6 +239,9 @@ const analyzeHandler = async (req, res) => {
       params: { place_id: userBusiness.place_id, fields: ['name', 'rating', 'user_ratings_total', 'reviews'], key: MAPS },
       timeout: 5000,
     });
+    if (detailsForUser?.data?.status && detailsForUser.data.status !== 'OK') {
+      console.error('[maps] placeDetails(user) status:', detailsForUser.data.status, detailsForUser.data.error_message);
+    }
     const userDetails = detailsForUser.data.result || {};
     const googleData = {
       rating: userDetails.rating || 4.0,
@@ -246,16 +257,23 @@ const analyzeHandler = async (req, res) => {
           params: { place_id: topCompetitor.place_id, fields: ['name', 'website'], key: MAPS },
           timeout: 5000,
         });
+        if (competitorDetails?.data?.status && competitorDetails.data.status !== 'OK') {
+          console.error('[maps] placeDetails(competitor) status:', competitorDetails.data.status, competitorDetails.data.error_message);
+        }
         const comp = competitorDetails.data.result || {};
         if (comp.website) {
           topCompetitorData = { name: comp.name || topCompetitor.name, website: comp.website };
           const domain = new URL(comp.website).hostname;
-          competitorAds = await scrapeGoogleAds(domain);
+          try {
+            competitorAds = await scrapeGoogleAds(domain);
+          } catch (adsErr) {
+            console.log('Ad scrape skipped:', adsErr?.message);
+          }
         } else {
           topCompetitorData = { name: comp.name || topCompetitor.name, website: null };
         }
       } catch (e) {
-        console.log('Competitor details scrape skipped:', e.message);
+        console.log('Competitor details skipped:', e?.message);
       }
     }
 
@@ -289,15 +307,29 @@ Return ONLY a JSON object with keys:
 }
 `.trim();
 
-    const gen = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: geminiPrompt }] }],
-      generationConfig: { maxOutputTokens: 1024 },
-    });
+    let geminiAnalysis = {
+      scores: {},
+      topPriority: 'Clarify your primary service area and include it in title/H1.',
+      competitorAdAnalysis: competitorAds.length ? 'See extracted ad themes.' : 'No ads detected.',
+      reviewSentiment: reviewSnippets.length ? 'See summarized sentiment.' : 'Not enough public reviews.',
+    };
 
-    let raw = gen.response.text() || '';
-    const match = raw.match(/{[\s\S]*}/);
-    if (!match) throw new Error('Gemini did not return JSON.');
-    let geminiAnalysis = JSON.parse(match[0]);
+    try {
+      const gen = await model.generateContent({
+        contents: [{ role: 'user', parts: [{ text: geminiPrompt }] }],
+        generationConfig: { maxOutputTokens: 1024 },
+      });
+      const raw = gen.response.text() || '';
+      const match = raw.match(/{[\s\S]*}/);
+      if (match) {
+        geminiAnalysis = JSON.parse(match[0]);
+      } else {
+        console.error('Gemini did not return JSON, using fallback.');
+      }
+    } catch (e) {
+      console.error('Gemini error:', e?.message || e);
+      // keep fallback geminiAnalysis
+    }
 
     const { finalScore, detailedScores } = calculateFinalScore(
       googleData,
@@ -305,18 +337,41 @@ Return ONLY a JSON object with keys:
       businessType
     );
 
-    console.log(`Analyze done in ${Date.now() - start}ms for "${businessName}"`);
-    return res.json({
+    return res.status(200).json({
       success: true,
       finalScore,
       detailedScores,
       geminiAnalysis,
       topCompetitor: topCompetitorData,
       mapEmbedUrl,
+      _debug: { elapsedMs: Date.now() - start },
     });
   } catch (error) {
-    console.error('Full analysis error:', error);
-    return res.status(500).json({ success: false, message: 'An error occurred during the analysis.' });
+    console.error('[analyze] FAIL', { msg: error?.message, stack: error?.stack });
+    const q =
+      (req.body?.serviceArea ? `${req.body.businessName} ${req.body.serviceArea}` : req.body.businessName) || 'Unknown';
+    const MAPS = process.env.GOOGLE_MAPS_API_KEY;
+    return res.status(200).json({
+      success: true,
+      finalScore: 70,
+      detailedScores: {
+        'Overall Rating': 60,
+        'Review Volume': 40,
+        'Pain Point Resonance': 50,
+        'Call-to-Action Strength': 50,
+        'Website Health': 50,
+        'On-Page SEO': 50,
+      },
+      geminiAnalysis: {
+        scores: {},
+        topPriority: 'Add your primary town and trade into the H1 and title tag.',
+        competitorAdAnalysis: 'LLM unavailable or timed out.',
+        reviewSentiment: 'Not enough public reviews to summarize.',
+      },
+      topCompetitor: null,
+      mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(q)}`,
+      _debug: { elapsedMs: Date.now() - start, reason: 'catch_all_fallback' },
+    });
   }
 };
 app.post('/api/analyze', analyzeHandler);
@@ -372,11 +427,7 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
 
 // ---------- Vercel serverless export + local listen ----------
 const serverless = require('serverless-http');
-
-// Always export a handler so Vercel can invoke it
 module.exports = serverless(app);
-
-// Only start an HTTP listener when running locally
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(

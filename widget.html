@@ -2,190 +2,112 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Elev8Trades Local Analysis</title>
+  <title>Elev8Trades Analysis</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap');
-    :root {
-      --bg: #0b0c0f; --card: #121418; --accent: #2EEA7B;
-      --ink: #F5F7FA; --sub: #a9b3ad; --border: #1c2126;
-    }
-    body { background-color: var(--bg); font-family: 'Inter', system-ui, sans-serif; color: var(--ink); margin: 0; padding: 36px 16px; }
-    .widget-container { max-width: 600px; margin: auto; }
-    .card { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
-    h1, h2, h3 { margin: 0 0 16px; }
-    h1 { font-size: 2rem; }
-    h2 { font-size: 1.25rem; color: var(--accent); }
-    h3 { font-size: 1.1rem; color: var(--ink); margin-top: 24px;}
-    .input-group { margin-bottom: 16px; }
-    .input-group label { display: block; font-weight: 600; margin-bottom: 6px; }
-    .input, select { width: 100%; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: #0f1115; color: var(--ink); font-size: 1rem; box-sizing: border-box; }
-    .service-area-group { display: flex; gap: 10px; align-items: center; }
-    .service-area-group .input { flex-grow: 1; }
-    .geo-btn { padding: 8px 10px; background-color: var(--border); border: none; color: var(--sub); border-radius: 8px; cursor: pointer; white-space: nowrap; }
-    .btn { width: 100%; padding: 14px 16px; border: none; border-radius: 10px; background: var(--accent); color: #1D2B24; font-weight: 800; cursor: pointer; font-size: 1.1rem; transition: filter .2s; }
-    .btn:hover { filter: brightness(1.1); }
-    .btn:disabled { background: #555; cursor: not-allowed; }
-    #results-container { text-align: left; margin-top: 24px; display: none; }
-    .score-display { text-align: center; margin-bottom: 20px; }
-    .score-display .score { font-size: 4rem; font-weight: 900; line-height: 1; }
-    .score-display .label { font-size: 1rem; color: var(--sub); }
-    .info-box { background: #1a1f24; border: 1px solid var(--border); border-left: 4px solid var(--accent); padding: 16px; border-radius: 8px; margin: 20px 0; }
-    .info-title { font-weight: 700; margin-bottom: 6px; }
-    .bar-chart { display: grid; gap: 12px; }
-    .bar { display: grid; grid-template-columns: 180px 1fr 50px; gap: 12px; align-items: center; }
-    .bar .label { color: #cfd6d2; font-size: 0.9rem; }
-    .bar .track { position: relative; height: 12px; background: #1a1f24; border-radius: 999px; border: 1px solid #20262c; }
-    .bar .fill { position: absolute; inset: 0; background: var(--accent); border-radius: 999px; }
-    .bar .val { font-weight: 700; }
-    .map-container { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; margin-top: 16px; height: 400px; }
-    .map-container iframe { width: 100%; height: 100%; border: 0; }
-    details { margin-top: 24px; border-top: 1px solid var(--border); padding-top: 16px; }
-    summary { font-weight: 700; cursor: pointer; }
-    .logic-explainer { color: var(--sub); line-height: 1.6; font-size: 0.9rem; padding-left: 1rem; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; }
+    .form { max-width: 680px; margin: 0 auto; }
+    .row { margin: 12px 0; }
+    label { display:block; margin-bottom: 6px; font-weight: 600; }
+    input[type="text"], input[type="url"] { width:100%; padding:10px; border:1px solid #ccc; border-radius:8px; }
+    .radio-row { display:flex; gap:12px; }
+    button { padding:12px 16px; border-radius:10px; border:0; background:#2563eb; color:#fff; cursor:pointer; }
+    button[disabled] { opacity: .6; cursor: not-allowed; }
+    #results { display:none; max-width: 680px; margin: 24px auto; }
+    .score-display { display:flex; align-items:center; gap:16px; margin-bottom:8px; }
+    .score-display .label { font-weight:600; color:#555; }
+    .score-display .score { font-size:42px; font-weight:800; }
+    .info-box { background:#f3f4f6; border-radius:12px; padding:14px 16px; margin:14px 0; }
+    .info-title { font-weight:700; margin-bottom:6px; }
+    .bar-chart { margin: 16px 0; }
+    .bar-row { display:grid; grid-template-columns: 180px 1fr 48px; align-items:center; gap:10px; margin: 8px 0; }
+    .bar-label { font-size: 14px; color:#333; }
+    .bar-container { background:#e5e7eb; border-radius:10px; height:10px; position:relative; overflow:hidden; }
+    .bar { height:100%; background:#10b981; }
+    .bar-value { text-align:right; }
+    .map-container { margin-top:16px; aspect-ratio: 16 / 9; }
+    .map-container iframe { width: 100%; height: 100%; border:0; border-radius: 12px; }
+    details { margin-top: 12px; }
+    .logic-explainer { white-space: pre-wrap; color:#444; }
   </style>
 </head>
 <body>
+  <div class="form">
+    <h1>Elev8Trades Analysis</h1>
 
-  <div class="widget-container">
-    <div class="card">
-      <h1>Local Visibility Analysis</h1>
-      <form id="analysis-form">
-        <div class="input-group">
-          <label for="businessName">Business Name</label>
-          <input type="text" id="businessName" placeholder="e.g., Prime Masonry LLC" required/>
+    <form id="analysisForm">
+      <div class="row">
+        <label for="businessName">Business Name *</label>
+        <input id="businessName" type="text" placeholder="Acme Plumbing" required />
+      </div>
+
+      <div class="row">
+        <label for="websiteUrl">Website URL *</label>
+        <input id="websiteUrl" type="url" placeholder="https://example.com" required />
+      </div>
+
+      <div class="row">
+        <label>Business Type *</label>
+        <div class="radio-row">
+          <label><input type="radio" name="businessType" value="specialty" required /> Specialty</label>
+          <label><input type="radio" name="businessType" value="maintenance" /> Maintenance</label>
         </div>
-        <div class="input-group">
-          <label for="websiteUrl">Website URL</label>
-          <input type="text" id="websiteUrl" placeholder="www.example.com" required/>
-        </div>
-        <div class="input-group">
-          <label for="serviceArea">Primary Service Area</label>
-          <div class="service-area-group">
-            <input type="text" id="serviceArea" class="input" placeholder="e.g., North Jersey, NYC" />
-            <button type="button" class="geo-btn" id="geo-button">Use My Location</button>
-          </div>
-        </div>
-        <div class="input-group">
-          <label for="businessType">Business Model</label>
-          <select id="businessType" required>
-            <option value="">Select your business model...</option>
-            <option value="specialty">Project-Based (e.g., Remodeling, 'one-time jobs')</option>
-            <option value="maintenance">Service-Based (e.g., Lawn Care, 'recurring plans')</option>
-          </select>
-        </div>
-        <button type="submit" class="btn" id="analyze-button">Analyze My Business</button>
-      </form>
-      <div id="results-container" aria-live="polite"></div>
-    </div>
+      </div>
+
+      <div class="row">
+        <label for="serviceArea">Primary Service Area (City/County/Region)</label>
+        <input id="serviceArea" type="text" placeholder="Middlesex County, NJ" />
+      </div>
+
+      <div class="row">
+        <button id="analyzeButton" type="submit">Analyze My Business</button>
+      </div>
+    </form>
   </div>
 
+  <div id="results"></div>
+
   <script>
-    // --- helpers ---
-    function withTimeout(promise, ms = 60000) {
-      let t;
-      const timeout = new Promise((_, rej) => (t = setTimeout(() => rej(new Error("Timeout")), ms)));
-      return Promise.race([promise.finally(() => clearTimeout(t)), timeout]);
+    function esc(s) { return s.toString().replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+    const form = document.getElementById('analysisForm');
+    const analyzeButton = document.getElementById('analyzeButton');
+    const resultsContainer = document.getElementById('results');
+
+    async function withTimeout(promise, ms) {
+      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out')), ms));
+      return Promise.race([promise, timeout]);
     }
 
-    function esc(s) {
-      return String(s || "").replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m]));
-    }
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const businessName = document.getElementById('businessName').value.trim();
+      const websiteUrl = document.getElementById('websiteUrl').value.trim();
+      const businessType = document.querySelector('input[name="businessType"]:checked')?.value;
+      const serviceArea = document.getElementById('serviceArea').value.trim();
 
-    function normalizeSite(u) {
-      try {
-        u = u.trim();
-        if (!/^https?:\/\//i.test(u)) u = "https://" + u;
-        const url = new URL(u);
-        if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(url.hostname)) throw new Error("bad host");
-        return url.toString();
-      } catch {
-        return "";
-      }
-    }
-
-    // Use your backend for reverse geocoding (less chance of CORS/rate-limit issues)
-    async function reverseGeocode(lat, lon) {
-      const url = `https://elev8-backend-1m1o.vercel.app/api/reverse?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`;
-      const r = await fetch(url);
-      if (!r.ok) throw new Error("Reverse geocode failed");
-      const j = await r.json();
-      return j.cityState || "";
-    }
-
-    // --- DOM refs ---
-    const form = document.getElementById("analysis-form");
-    const analyzeButton = document.getElementById("analyze-button");
-    const resultsContainer = document.getElementById("results-container");
-    const serviceAreaInput = document.getElementById("serviceArea");
-    const geoButton = document.getElementById("geo-button");
-    const websiteUrlInput = document.getElementById("websiteUrl");
-    let selectedBusinessType = "";
-
-    geoButton.addEventListener("click", () => {
-      if (!navigator.geolocation) return alert("Geolocation not supported by your browser.");
-      geoButton.textContent = "Finding...";
-      navigator.geolocation.getCurrentPosition(
-        async (pos) => {
-          try {
-            const val = await reverseGeocode(pos.coords.latitude, pos.coords.longitude);
-            serviceAreaInput.value = val || "Your Area";
-          } catch (err) {
-            console.error("Geocoding failed:", err);
-            alert("Could not determine city name from your location.");
-          } finally {
-            geoButton.textContent = "Use My Location";
-          }
-        },
-        () => {
-          alert("Could not get your location. Please grant permission or type it in manually.");
-          geoButton.textContent = "Use My Location";
-        },
-        { timeout: 7000 }
-      );
-    });
-
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const businessName = document.getElementById("businessName").value;
-      selectedBusinessType = document.getElementById("businessType").value;
-      let serviceArea = serviceAreaInput.value;
-
-      const websiteUrl = normalizeSite(websiteUrlInput.value);
-      if (!websiteUrl) {
-        alert("Please enter a valid website URL.");
+      if (!businessName || !websiteUrl || !businessType) {
+        alert('Please fill out all required fields.');
         return;
       }
 
-      if (!serviceArea) {
-        if (!confirm("For the most accurate competitor analysis, please enter your primary service area. Continue anyway?")) {
-          return;
-        }
-      }
-
       analyzeButton.disabled = true;
-      analyzeButton.textContent = "Our Elev8Engine is performing a real-time AI analysis...";
-      resultsContainer.style.display = "none";
+      analyzeButton.textContent = "Analyzing...";
 
       try {
-        // ✅ Use stable /api endpoint on your Vercel project
         const fetchPromise = fetch("https://elev8-backend-1m1o.vercel.app/api/analyze", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ businessName, websiteUrl, businessType: selectedBusinessType, serviceArea })
+          body: JSON.stringify({ businessName, websiteUrl, businessType, serviceArea })
         });
 
-        const response = await withTimeout(fetchPromise, 60000);
+        const response = await withTimeout(fetchPromise, 30000); // 30s timeout
         if (!response.ok) throw new Error("Server returned an error");
         const data = await response.json();
         displayResults(data);
       } catch (error) {
         resultsContainer.style.display = "block";
-        if (error.message === "Timeout") {
-          resultsContainer.innerHTML = `<p style="color: red;"><strong>Error:</strong> The analysis took too long to complete. This can happen with very slow websites. Please try again.</p>`;
-        } else {
-          resultsContainer.innerHTML = `<p style="color: red;"><strong>Error:</strong> Could not get analysis. Is the server running?</p>`;
-        }
+        resultsContainer.innerHTML = `<p style="color: red;"><strong>Error:</strong> ${esc(error.message)}</p>`;
         console.error("Fetch error:", error);
       } finally {
         analyzeButton.disabled = false;
@@ -194,47 +116,28 @@
     });
 
     function displayResults(data) {
-      if (!data.success) {
-        resultsContainer.innerHTML = `<p style="color: red;"><strong>Analysis Failed:</strong> ${esc(data.message)}</p>`;
-        resultsContainer.style.display = "block";
-        return;
-      }
+      const detailedBarsHTML = Object.entries(data.detailedScores || {}).map(([key, value]) => `
+        <div class="bar-row">
+          <span class="bar-label">${esc(key)}</span>
+          <div class="bar-container">
+            <div class="bar" style="width: ${Number(value) || 0}%;"></div>
+          </div>
+          <span class="bar-value">${Number(value) || 0}</span>
+        </div>
+      `).join('');
 
-      let detailedBarsHTML = "";
-      for (const [label, score] of Object.entries(data.detailedScores)) {
-        detailedBarsHTML += `
-          <div class="bar">
-            <div class="label">${esc(label)}</div>
-            <div class="track"><div class="fill" style="width: ${Number(score)}%;"></div></div>
-            <div class="val">${Number(score)}</div>
-          </div>`;
-      }
+      const logicExplainer = `
+Your score reflects Google search visibility, based on:
+- Overall Rating: Your average star rating from Google reviews.
+- Review Volume: Number of reviews influencing trust.
+- Pain Point Resonance: How well your website addresses customer pain points (AI-estimated).
+- Call-to-Action Strength: Clarity of your website’s calls to action (AI-estimated).
+- Website Health: Technical health of your site (AI-estimated).
+- On-Page SEO: Keyword optimization (AI-estimated).
+`.trim();
 
-      const logicExplainer = selectedBusinessType === "specialty" ? `
-        <p>For <strong>Project-Based</strong> businesses, we weigh factors that build deep trust for high-ticket sales more heavily:</p>
-        <ul>
-          <li><strong>Pain Point Resonance (20%)</strong></li>
-          <li><strong>Overall Rating (20%)</strong></li>
-          <li><strong>Review Volume (15%)</strong></li>
-          <li><strong>Website Health (15%)</strong></li>
-          <li><strong>On-Page SEO (15%)</strong></li>
-          <li><strong>Call-to-Action Strength (5%)</strong></li>
-        </ul>
-      ` : `
-        <p>For <strong>Service-Based</strong> businesses, we weigh factors that drive quick, convenient conversions more heavily:</p>
-        <ul>
-          <li><strong>Call-to-Action Strength (25%)</strong></li>
-          <li><strong>Overall Rating (15%)</strong></li>
-          <li><strong>Review Volume (15%)</strong></li>
-          <li><strong>Website Health (15%)</strong></li>
-          <li><strong>On-Page SEO (15%)</strong></li>
-          <li><strong>Pain Point Resonance (5%)</strong></li>
-        </ul>
-      `;
-
-      // Convert normal Google Maps URLs to embeddable form if needed
-      let safeMapUrl = "";
-      if (typeof data.mapEmbedUrl === "string" && data.mapEmbedUrl.startsWith("https://www.google.com/maps")) {
+      let safeMapUrl = '';
+      if (data.mapEmbedUrl && data.mapEmbedUrl.startsWith("https://www.google.com/maps")) {
         safeMapUrl = data.mapEmbedUrl.includes("output=embed")
           ? data.mapEmbedUrl
           : (data.mapEmbedUrl.includes("?")
@@ -242,11 +145,11 @@
               : data.mapEmbedUrl + "?output=embed");
       }
 
-      const safeFinalScore = Number(data.finalScore);
-      const safeTopPriority = esc(data.geminiAnalysis.topPriority);
-      const safeReviewSentiment = esc(data.geminiAnalysis.reviewSentiment);
-      const safeCompetitorName = esc(data.topCompetitor?.name || "Top Competitor");
-      const safeCompetitorAnalysis = esc(data.geminiAnalysis.competitorAdAnalysis);
+      const safeFinalScore = Number(data.finalScore) || 70;
+      const safeTopPriority = esc((data.geminiAnalysis && data.geminiAnalysis.topPriority) || '—');
+      const safeReviewSentiment = esc((data.geminiAnalysis && data.geminiAnalysis.reviewSentiment) || '—');
+      const safeCompetitorName = esc((data.topCompetitor && data.topCompetitor.name) || "Top Competitor");
+      const safeCompetitorAnalysis = esc((data.geminiAnalysis && data.geminiAnalysis.competitorAdAnalysis) || '—');
 
       const resultsHTML = `
         <div class="score-display">
@@ -284,7 +187,7 @@
         <details>
           <summary>How We Calculated Your Score</summary>
           <div class="logic-explainer">
-            ${logicExplainer}
+            ${esc(logicExplainer)}
           </div>
         </details>
       `;
