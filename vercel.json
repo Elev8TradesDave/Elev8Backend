@@ -1,6 +1,11 @@
 {
   "version": 2,
+  "functions": {
+    "api/server.js": { "runtime": "nodejs20.x", "memory": 2048, "maxDuration": 60 },
+    "api/health.js": { "runtime": "nodejs20.x" }
+  },
   "rewrites": [
+    { "source": "/api/health", "destination": "/api/health.js" },
     { "source": "/api/(.*)", "destination": "/api/server.js" }
   ]
 }
