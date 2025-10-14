@@ -14,6 +14,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const puppeteer = require("puppeteer-core");
 const chromium = require("@sparticuz/chromium");
 const serverless = require("serverless-http");
+const path = require("path"); // <-- ADDED
 
 // ---------- CONFIG ----------
 const PORT = process.env.PORT || 3001;
@@ -60,6 +61,13 @@ app.use(
 // Stop browsers from hitting the lambda for icons
 app.use("/favicon.ico", (_req, res) => res.status(204).end());
 app.use("/favicon.png", (_req, res) => res.status(204).end());
+
+// ---------- SERVE WIDGET AT ROOT ----------
+// When someone opens https://<your-domain>/, send widget.html
+app.get("/", (_req, res) => {
+  // __dirname is .../api/, widget.html lives one level up
+  res.sendFile(path.join(__dirname, "..", "widget.html"));
+});
 
 // ---------- HEALTH (fast & zero deps) ----------
 const healthHandler = (_req, res) =>
