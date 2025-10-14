@@ -68,6 +68,10 @@
   <div id="results"></div>
 
   <script>
+    // Use a relative API so this works on Render and localhost.
+    // Keep ?quick=1 for fast smoke tests. Remove it later for full analysis.
+    const API = "/api/analyze?quick=1";
+
     function esc(s) { return s.toString().replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
     const form = document.getElementById('analysisForm');
@@ -95,7 +99,7 @@
       analyzeButton.textContent = "Analyzing...";
 
       try {
-        const fetchPromise = fetch("https://elev8-backend-1m1o.vercel.app/api/analyze", {
+        const fetchPromise = fetch(API, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ businessName, websiteUrl, businessType, serviceArea })
