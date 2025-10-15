@@ -1,56 +1,73 @@
-// Use a relative API so this works on Render and localhost.
-// Keep ?quick=1 for fast smoke tests. Remove it later for full analysis.
-const API = "/api/analyze?quick=1";
+// Works on Render and localhost
+const API_PATH = "/api/analyze";
 
-function esc(s) { return s.toString().replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function esc(s) { return String(s ?? "").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+function isHttpUrl(u) { try { const x = new URL(u); return x.protocol === "http:" || x.protocol === "https:"; } catch { return false; } }
 
-const form = document.getElementById('analysisForm');
-const analyzeButton = document.getElementById('analyzeButton');
-const resultsContainer = document.getElementById('results');
+const form = document.getElementById("analysisForm");
+const analyzeButton = document.getElementById("analyzeButton");
+const resultsContainer = document.getElementById("results");
+const fastMode = document.getElementById("fastMode");
+const formError = document.getElementById("formError");
 
 async function withTimeout(promise, ms) {
-  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out')), ms));
-  return Promise.race([promise, timeout]);
+  const t = new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out")), ms));
+  return Promise.race([promise, t]);
 }
 
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
-  const businessName = document.getElementById('businessName').value.trim();
-  const websiteUrl = document.getElementById('websiteUrl').value.trim();
-  const businessType = document.querySelector('input[name="businessType"]:checked')?.value;
-  const serviceArea = document.getElementById('serviceArea').value.trim();
+  formError.style.display = "none";
+  formError.textContent = "";
 
+  const businessName = document.getElementById("businessName").value.trim();
+  const websiteUrl = document.getElementById("websiteUrl").value.trim();
+  const businessType = document.querySelector('input[name="businessType"]:checked')?.value;
+  const serviceArea = document.getElementById("serviceArea").value.trim();
+
+  // Minimal validation
   if (!businessName || !websiteUrl || !businessType) {
-    alert('Please fill out all required fields.');
+    formError.textContent = "Please fill out all required fields.";
+    formError.style.display = "block";
+    return;
+  }
+  if (!isHttpUrl(websiteUrl)) {
+    formError.textContent = "Website URL must start with http:// or https://";
+    formError.style.display = "block";
     return;
   }
 
   analyzeButton.disabled = true;
-  analyzeButton.textContent = "Analyzing...";
+  const oldLabel = analyzeButton.textContent;
+  analyzeButton.textContent = "Analyzing…";
 
   try {
-    const fetchPromise = fetch(API, {
+    const endpoint = fastMode?.checked ? `${API_PATH}?quick=1` : API_PATH;
+
+    const fetchPromise = fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ businessName, websiteUrl, businessType, serviceArea })
     });
 
-    const response = await withTimeout(fetchPromise, 30000); // 30s timeout
-    if (!response.ok) throw new Error("Server returned an error");
+    // Give full analysis a little more time; quick mode returns fast anyway.
+    const response = await withTimeout(fetchPromise, fastMode?.checked ? 30000 : 45000);
+    if (!response.ok) throw new Error(`Server error (${response.status})`);
+
     const data = await response.json();
     displayResults(data);
   } catch (error) {
     resultsContainer.style.display = "block";
-    resultsContainer.innerHTML = `<p style="color: red;"><strong>Error:</strong> ${esc(error.message)}</p>`;
+    resultsContainer.innerHTML = `<p style="color:#b91c1c"><strong>Error:</strong> ${esc(error.message || error)}</p>`;
     console.error("Fetch error:", error);
   } finally {
     analyzeButton.disabled = false;
-    analyzeButton.textContent = "Analyze My Business";
+    analyzeButton.textContent = oldLabel;
   }
 });
 
 function displayResults(data) {
-  const detailedBarsHTML = Object.entries(data.detailedScores || {}).map(([key, value]) => `
+  const detailedBarsHTML = Object.entries(data?.detailedScores || {}).map(([key, value]) => `
     <div class="bar-row">
       <span class="bar-label">${esc(key)}</span>
       <div class="bar-container">
@@ -58,7 +75,7 @@ function displayResults(data) {
       </div>
       <span class="bar-value">${Number(value) || 0}</span>
     </div>
-  `).join('');
+  `).join("");
 
   const logicExplainer = `
 Your score reflects Google search visibility, based on:
@@ -70,20 +87,19 @@ Your score reflects Google search visibility, based on:
 - On-Page SEO: Keyword optimization (AI-estimated).
 `.trim();
 
-  let safeMapUrl = '';
-  if (data.mapEmbedUrl && data.mapEmbedUrl.startsWith("https://www.google.com/maps")) {
-    safeMapUrl = data.mapEmbedUrl.includes("output=embed")
-      ? data.mapEmbedUrl
-      : (data.mapEmbedUrl.includes("?")
-          ? data.mapEmbedUrl + "&output=embed"
-          : data.mapEmbedUrl + "?output=embed");
+  // IMPORTANT: Do NOT append output=embed. The /maps/embed/v1/... URL is already embeddable.
+  let safeMapUrl = "";
+  if (typeof data?.mapEmbedUrl === "string" &&
+      data.mapEmbedUrl.startsWith("https://www.google.com/maps/embed/")) {
+    safeMapUrl = data.mapEmbedUrl;
   }
 
-  const safeFinalScore = Number(data.finalScore) || 70;
-  const safeTopPriority = esc((data.geminiAnalysis && data.geminiAnalysis.topPriority) || '—');
-  const safeReviewSentiment = esc((data.geminiAnalysis && data.geminiAnalysis.reviewSentiment) || '—');
-  const safeCompetitorName = esc((data.topCompetitor && data.topCompetitor.name) || "Top Competitor");
-  const safeCompetitorAnalysis = esc((data.geminiAnalysis && data.geminiAnalysis.competitorAdAnalysis) || '—');
+  const safeFinalScore = Number(data?.finalScore) || 70;
+  const ga = data?.geminiAnalysis || {};
+  const safeTopPriority = esc(ga.topPriority || "—");
+  const safeReviewSentiment = esc(ga.reviewSentiment || "—");
+  const safeCompetitorName = esc(data?.topCompetitor?.name || "Top Competitor");
+  const safeCompetitorAnalysis = esc(ga.competitorAdAnalysis || "—");
 
   const resultsHTML = `
     <div class="score-display">
@@ -128,4 +144,5 @@ Your score reflects Google search visibility, based on:
 
   resultsContainer.innerHTML = resultsHTML;
   resultsContainer.style.display = "block";
+  resultsContainer.scrollIntoView({ behavior: "smooth", block: "start" });
 }
