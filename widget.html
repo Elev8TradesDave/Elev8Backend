@@ -5,15 +5,17 @@
   <title>Elev8Trades Analysis</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; }
-    .form { max-width: 680px; margin: 0 auto; }
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; line-height: 1.45; }
+    .form { max-width: 720px; margin: 0 auto; }
     .row { margin: 12px 0; }
     label { display:block; margin-bottom: 6px; font-weight: 600; }
     input[type="text"], input[type="url"] { width:100%; padding:10px; border:1px solid #ccc; border-radius:8px; }
     .radio-row { display:flex; gap:12px; }
-    button { padding:12px 16px; border-radius:10px; border:0; background:#2563eb; color:#fff; cursor:pointer; }
+    .controls { display:flex; gap:16px; align-items:center; margin-top:8px; }
+    button { padding:12px 16px; border-radius:10px; border:0; background:#2563eb; color:#fff; cursor:pointer; font-weight:600; }
     button[disabled] { opacity: .6; cursor: not-allowed; }
-    #results { display:none; max-width: 680px; margin: 24px auto; }
+    #results { display:none; max-width: 720px; margin: 24px auto; }
     .score-display { display:flex; align-items:center; gap:16px; margin-bottom:8px; }
     .score-display .label { font-weight:600; color:#555; }
     .score-display .score { font-size:42px; font-weight:800; }
@@ -29,21 +31,24 @@
     .map-container iframe { width: 100%; height: 100%; border:0; border-radius: 12px; }
     details { margin-top: 12px; }
     .logic-explainer { white-space: pre-wrap; color:#444; }
+    .hint { font-size: 12px; color:#666; margin-top:4px; }
+    .error { color:#b91c1c; }
   </style>
 </head>
 <body>
   <div class="form">
     <h1>Elev8Trades Analysis</h1>
 
-    <form id="analysisForm">
+    <form id="analysisForm" novalidate>
       <div class="row">
         <label for="businessName">Business Name *</label>
-        <input id="businessName" type="text" placeholder="Acme Plumbing" required />
+        <input id="businessName" type="text" placeholder="Acme Plumbing" required autocomplete="organization" />
       </div>
 
       <div class="row">
         <label for="websiteUrl">Website URL *</label>
-        <input id="websiteUrl" type="url" placeholder="https://example.com" required />
+        <input id="websiteUrl" type="url" placeholder="https://example.com" required inputmode="url" autocomplete="url" />
+        <div class="hint">Must start with <code>http://</code> or <code>https://</code></div>
       </div>
 
       <div class="row">
@@ -56,79 +61,103 @@
 
       <div class="row">
         <label for="serviceArea">Primary Service Area (City/County/Region)</label>
-        <input id="serviceArea" type="text" placeholder="Middlesex County, NJ" />
+        <input id="serviceArea" type="text" placeholder="Middlesex County, NJ" autocomplete="address-level2" />
       </div>
 
-      <div class="row">
+      <div class="row controls">
         <button id="analyzeButton" type="submit">Analyze My Business</button>
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input type="checkbox" id="fastMode" />
+          Fast test mode
+        </label>
       </div>
+      <div id="formError" class="hint error" role="alert" style="display:none;"></div>
     </form>
   </div>
 
   <div id="results"></div>
 
   <script>
-    // Use a relative API so this works on Render and localhost.
-    // Keep ?quick=1 for fast smoke tests. Remove it later for full analysis.
-    const API = "/api/analyze?quick=1";
+    // Relative API path works both on Render and localhost
+    const API_PATH = "/api/analyze";
 
-    function esc(s) { return s.toString().replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+    function esc(s) { return String(s ?? "").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+    function isHttpUrl(u) { try { const x = new URL(u); return x.protocol === "http:" || x.protocol === "https:"; } catch { return false; } }
 
-    const form = document.getElementById('analysisForm');
-    const analyzeButton = document.getElementById('analyzeButton');
-    const resultsContainer = document.getElementById('results');
+    const form = document.getElementById("analysisForm");
+    const analyzeButton = document.getElementById("analyzeButton");
+    const resultsContainer = document.getElementById("results");
+    const formError = document.getElementById("formError");
+    const fastMode = document.getElementById("fastMode");
 
     async function withTimeout(promise, ms) {
-      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out')), ms));
-      return Promise.race([promise, timeout]);
+      const t = new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out")), ms));
+      return Promise.race([promise, t]);
     }
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const businessName = document.getElementById('businessName').value.trim();
-      const websiteUrl = document.getElementById('websiteUrl').value.trim();
-      const businessType = document.querySelector('input[name="businessType"]:checked')?.value;
-      const serviceArea = document.getElementById('serviceArea').value.trim();
+      formError.style.display = "none";
+      formError.textContent = "";
 
+      const businessName = document.getElementById("businessName").value.trim();
+      const websiteUrl = document.getElementById("websiteUrl").value.trim();
+      const businessType = document.querySelector('input[name="businessType"]:checked')?.value;
+      const serviceArea = document.getElementById("serviceArea").value.trim();
+
+      // Minimal client validation
       if (!businessName || !websiteUrl || !businessType) {
-        alert('Please fill out all required fields.');
+        formError.textContent = "Please fill out all required fields.";
+        formError.style.display = "block";
+        return;
+      }
+      if (!isHttpUrl(websiteUrl)) {
+        formError.textContent = "Website URL must start with http:// or https://";
+        formError.style.display = "block";
         return;
       }
 
       analyzeButton.disabled = true;
-      analyzeButton.textContent = "Analyzing...";
+      const oldLabel = analyzeButton.textContent;
+      analyzeButton.textContent = "Analyzing…";
 
       try {
-        const fetchPromise = fetch(API, {
+        const endpoint = fastMode.checked ? `${API_PATH}?quick=1` : API_PATH;
+        const fetchPromise = fetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ businessName, websiteUrl, businessType, serviceArea })
         });
 
-        const response = await withTimeout(fetchPromise, 30000); // 30s timeout
-        if (!response.ok) throw new Error("Server returned an error");
+        const response = await withTimeout(fetchPromise, 45000); // 45s to allow full analysis path
+        if (!response.ok) throw new Error(`Server error (${response.status})`);
+
         const data = await response.json();
         displayResults(data);
       } catch (error) {
         resultsContainer.style.display = "block";
-        resultsContainer.innerHTML = `<p style="color: red;"><strong>Error:</strong> ${esc(error.message)}</p>`;
+        resultsContainer.innerHTML = `<p class="error"><strong>Error:</strong> ${esc(error.message || error)}</p>`;
         console.error("Fetch error:", error);
       } finally {
         analyzeButton.disabled = false;
-        analyzeButton.textContent = "Analyze My Business";
+        analyzeButton.textContent = oldLabel;
       }
     });
 
     function displayResults(data) {
-      const detailedBarsHTML = Object.entries(data.detailedScores || {}).map(([key, value]) => `
-        <div class="bar-row">
-          <span class="bar-label">${esc(key)}</span>
-          <div class="bar-container">
-            <div class="bar" style="width: ${Number(value) || 0}%;"></div>
+      const detailed = data?.detailedScores ?? {};
+      const detailedBarsHTML = Object.entries(detailed).map(([key, value]) => {
+        const v = Number(value) || 0;
+        return `
+          <div class="bar-row">
+            <span class="bar-label">${esc(key)}</span>
+            <div class="bar-container">
+              <div class="bar" style="width: ${v}%;"></div>
+            </div>
+            <span class="bar-value">${v}</span>
           </div>
-          <span class="bar-value">${Number(value) || 0}</span>
-        </div>
-      `).join('');
+        `;
+      }).join("");
 
       const logicExplainer = `
 Your score reflects Google search visibility, based on:
@@ -140,8 +169,8 @@ Your score reflects Google search visibility, based on:
 - On-Page SEO: Keyword optimization (AI-estimated).
 `.trim();
 
-      let safeMapUrl = '';
-      if (data.mapEmbedUrl && data.mapEmbedUrl.startsWith("https://www.google.com/maps")) {
+      let safeMapUrl = "";
+      if (typeof data?.mapEmbedUrl === "string" && data.mapEmbedUrl.startsWith("https://www.google.com/maps")) {
         safeMapUrl = data.mapEmbedUrl.includes("output=embed")
           ? data.mapEmbedUrl
           : (data.mapEmbedUrl.includes("?")
@@ -149,11 +178,12 @@ Your score reflects Google search visibility, based on:
               : data.mapEmbedUrl + "?output=embed");
       }
 
-      const safeFinalScore = Number(data.finalScore) || 70;
-      const safeTopPriority = esc((data.geminiAnalysis && data.geminiAnalysis.topPriority) || '—');
-      const safeReviewSentiment = esc((data.geminiAnalysis && data.geminiAnalysis.reviewSentiment) || '—');
-      const safeCompetitorName = esc((data.topCompetitor && data.topCompetitor.name) || "Top Competitor");
-      const safeCompetitorAnalysis = esc((data.geminiAnalysis && data.geminiAnalysis.competitorAdAnalysis) || '—');
+      const safeFinalScore = Number(data?.finalScore) || 70;
+      const ga = data?.geminiAnalysis || {};
+      const safeTopPriority = esc(ga.topPriority || "—");
+      const safeReviewSentiment = esc(ga.reviewSentiment || "—");
+      const safeCompetitorName = esc(data?.topCompetitor?.name || "Top Competitor");
+      const safeCompetitorAnalysis = esc(ga.competitorAdAnalysis || "—");
 
       const resultsHTML = `
         <div class="score-display">
@@ -198,6 +228,7 @@ Your score reflects Google search visibility, based on:
 
       resultsContainer.innerHTML = resultsHTML;
       resultsContainer.style.display = "block";
+      resultsContainer.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   </script>
 </body>
