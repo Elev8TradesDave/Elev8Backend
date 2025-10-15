@@ -1,7 +1,8 @@
 /**
- * Elev8Trades Backend (Vercel/Render-ready, IPv6-safe)
+ * Elev8Trades Backend (Render/Vercel-friendly, IPv6-safe)
  * File: api/server.js
  */
+
 require("dotenv").config();
 
 const express = require("express");
@@ -24,16 +25,39 @@ const isVercel = !!process.env.VERCEL;
 const app = express();
 app.set("trust proxy", 1);
 
-// Secure headers (defaults)
-app.use(helmet());
+// Security headers (with CSP that allows Google Maps iframe)
+app.use(
+  helmet({
+    // We embed an iframe from Google Maps; allow it explicitly.
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"], // all JS must come from our origin (we load /widget.js)
+        styleSrc: ["'self'", "'unsafe-inline'"], // allow inline styles in widget.html
+        imgSrc: ["'self'", "data:"],
+        connectSrc: ["'self'"], // our frontend fetches only our own /api/*
+        frameSrc: ["'self'", "https://www.google.com", "https://*.google.com"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        frameAncestors: ["'self'"],
+        upgradeInsecureRequests: []
+      }
+    },
+    // Some embed scenarios break with COEP/COOP; keep off for simplicity.
+    crossOriginEmbedderPolicy: false
+  })
+);
 
-// Allow all origins for this API
+// Allow all origins (this service is an API + static widget)
 app.use(cors());
 
-// JSON parsing (small)
+// JSON body parsing (keep small)
 app.use(express.json({ limit: "200kb" }));
 
-// ---------- RATE LIMIT (IPv6-safe) ----------
+// Serve static assets from repo root (so /widget.js loads)
+app.use(express.static(path.join(__dirname, "..")));
+
+// ---------- RATE LIMIT (IPv6-safe key) ----------
 const ipFromReq = (req) => {
   const xff = req.headers["x-forwarded-for"];
   if (typeof xff === "string" && xff.length) return xff.split(",")[0].trim();
@@ -53,36 +77,31 @@ app.use(
     legacyHeaders: false,
     keyGenerator: (req) => ipFromReq(req),
     validate: false,
-    skipFailedRequests: true,
+    skipFailedRequests: true
   })
 );
 
-// Avoid favicon hits in lambdas
+// Stop browsers from hitting the lambda for icons
 app.use("/favicon.ico", (_req, res) => res.status(204).end());
 app.use("/favicon.png", (_req, res) => res.status(204).end());
 
-// ---------- SERVE WIDGET ----------
+// ---------- SERVE WIDGET AT ROOT ----------
 app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "..", "widget.html"));
 });
 
-app.get("/widget.js", (_req, res) => {
-  res.type("application/javascript");
-  res.sendFile(path.join(__dirname, "..", "widget.js"));
-});
-
-// ---------- HEALTH ----------
+// ---------- HEALTH (fast & zero deps) ----------
 const healthHandler = (_req, res) =>
   res.json({
     ok: true,
     mapsKeyPresent: Boolean(process.env.GOOGLE_MAPS_API_KEY),
     geminiKeyPresent: Boolean(process.env.GEMINI_API_KEY),
-    env: process.env.NODE_ENV || "unknown",
+    env: process.env.NODE_ENV || "unknown"
   });
 app.get("/api/health", healthHandler);
 app.get("/health", healthHandler);
 
-// ---------- CONFIG GUARD ----------
+// ---------- CONFIG GUARD (after health) ----------
 app.use((req, res, next) => {
   if (!process.env.GOOGLE_MAPS_API_KEY || !process.env.GEMINI_API_KEY) {
     console.error("Missing required API keys");
@@ -100,12 +119,16 @@ const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
 
 const isHttpUrl = (u) => {
-  try { const url = new URL(u); return /^https?:$/.test(url.protocol); }
-  catch { return false; }
+  try {
+    const url = new URL(u);
+    return /^https?:$/.test(url.protocol);
+  } catch {
+    return false;
+  }
 };
 
 const withTimeout = (p, ms, label = "timeout") =>
-  Promise.race([ p, new Promise((_, rej) => setTimeout(() => rej(new Error(label)), ms)) ]);
+  Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(label)), ms))]);
 
 let sharedBrowserPromise;
 async function getBrowser() {
@@ -114,7 +137,7 @@ async function getBrowser() {
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
       executablePath: isVercel ? await chromium.executablePath() : undefined,
-      headless: chromium.headless,
+      headless: chromium.headless
     });
   }
   return sharedBrowserPromise;
@@ -127,13 +150,16 @@ async function scrapeGoogleAds(domain) {
     const browser = await getBrowser();
     page = await browser.newPage();
     await page.setUserAgent("Mozilla/5.0 (compatible; Elev8Engine/1.0)");
-    await page.goto("https://adstransparency.google.com/", { waitUntil: "domcontentloaded", timeout: 5000 });
+    await page.goto("https://adstransparency.google.com/", {
+      waitUntil: "domcontentloaded",
+      timeout: 5000
+    });
     await page.waitForSelector('input[placeholder="Advertiser name, topic or website"]', { timeout: 5000 });
     await page.type('input[placeholder="Advertiser name, topic or website"]', domain);
     await page.keyboard.press("Enter");
     await page.waitForSelector('[data-test-id="ad-creative-card"]', { timeout: 5000 });
-    const ads = await page.$$eval('[data-test-id="ad-creative-card"]', nodes =>
-      nodes.slice(0, 3).map(n => n.innerText || "")
+    const ads = await page.$$eval('[data-test-id="ad-creative-card"]', (nodes) =>
+      nodes.slice(0, 3).map((n) => n.innerText || "")
     );
     return ads;
   } catch (e) {
@@ -150,13 +176,18 @@ const reverseHandler = async (req, res) => {
   if (!lat || !lon) return res.status(400).json({ error: "Latitude and longitude are required." });
   try {
     const { data } = await mapsClient.reverseGeocode({
-      params: { latlng: { lat: Number(lat), lng: Number(lon) }, result_type: ["locality", "political"], key: process.env.GOOGLE_MAPS_API_KEY },
-      timeout: 5000,
+      params: {
+        latlng: { lat: Number(lat), lng: Number(lon) },
+        result_type: ["locality", "political"],
+        key: process.env.GOOGLE_MAPS_API_KEY
+      },
+      timeout: 5000
     });
     const result = (data.results || [])[0];
     if (!result) return res.status(404).json({ error: "Could not find city for coordinates." });
 
-    let city = "", state = "";
+    let city = "",
+      state = "";
     for (const c of result.address_components) {
       if (c.types.includes("locality")) city = c.long_name;
       if (c.types.includes("administrative_area_level_1")) state = c.short_name;
@@ -175,11 +206,9 @@ const analyzeHandler = async (req, res) => {
   const start = Date.now();
   const { businessName, websiteUrl, businessType, serviceArea } = req.body || {};
 
-  // QUICK MODE for smoke tests (no external calls)
+  // QUICK MODE: fast smoke test (no external calls)
   const quickMode =
-    req.query.quick === "1" ||
-    req.headers["x-quick"] === "1" ||
-    req.headers["x-skip-external"] === "1";
+    req.query.quick === "1" || req.headers["x-quick"] === "1" || req.headers["x-skip-external"] === "1";
 
   if (quickMode) {
     const MAPS = process.env.GOOGLE_MAPS_API_KEY || "";
@@ -194,26 +223,29 @@ const analyzeHandler = async (req, res) => {
         "Pain Point Resonance": 50,
         "Call-to-Action Strength": 50,
         "Website Health": 50,
-        "On-Page SEO": 50,
+        "On-Page SEO": 50
       },
       geminiAnalysis: {
         scores: {},
         topPriority: "Add your primary town and trade into the H1 and title tag.",
         competitorAdAnalysis: "Quick mode: external calls skipped.",
-        reviewSentiment: "Quick mode: external calls skipped.",
+        reviewSentiment: "Quick mode: external calls skipped."
       },
       topCompetitor: null,
-      mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(q || "Business")}`,
+      mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(q || "Business")}`
     });
   }
 
   // Validate input for full run
-  if (!businessName || !websiteUrl || !businessType)
+  if (!businessName || !websiteUrl || !businessType) {
     return res.status(400).json({ success: false, message: "Missing required fields." });
-  if (!isHttpUrl(websiteUrl))
+  }
+  if (!isHttpUrl(websiteUrl)) {
     return res.status(400).json({ success: false, message: "Invalid websiteUrl" });
-  if (!["specialty", "maintenance"].includes(businessType))
+  }
+  if (!["specialty", "maintenance"].includes(businessType)) {
     return res.status(400).json({ success: false, message: "Invalid businessType" });
+  }
 
   const MAPS = process.env.GOOGLE_MAPS_API_KEY;
   const effectiveServiceArea = (serviceArea || "").toString().trim();
@@ -221,15 +253,21 @@ const analyzeHandler = async (req, res) => {
   const fallbackQuery = `${businessName} contractor`;
 
   try {
-    // Google Places (5s)
-    let placesResponse = await mapsClient.textSearch({ params: { query: primaryQuery, key: MAPS }, timeout: 5000 });
+    // Google Places search (5s)
+    let placesResponse = await mapsClient.textSearch({
+      params: { query: primaryQuery, key: MAPS },
+      timeout: 5000
+    });
     let allResults = placesResponse.data.results || [];
     if (allResults.length === 0) {
-      placesResponse = await mapsClient.textSearch({ params: { query: fallbackQuery, key: MAPS }, timeout: 5000 });
+      placesResponse = await mapsClient.textSearch({
+        params: { query: fallbackQuery, key: MAPS },
+        timeout: 5000
+      });
       allResults = placesResponse.data.results || [];
     }
 
-    // If still nothing: safe canned result
+    // If still nothing, return a safe canned result
     if (allResults.length === 0) {
       return res.status(200).json({
         success: true,
@@ -240,16 +278,16 @@ const analyzeHandler = async (req, res) => {
           "Pain Point Resonance": 50,
           "Call-to-Action Strength": 50,
           "Website Health": 50,
-          "On-Page SEO": 50,
+          "On-Page SEO": 50
         },
         geminiAnalysis: {
           scores: {},
           topPriority: "Add your primary town and trade into the H1 and title tag.",
           competitorAdAnalysis: "No competitor detected for this query.",
-          reviewSentiment: "Not enough public reviews to summarize.",
+          reviewSentiment: "Not enough public reviews to summarize."
         },
         topCompetitor: null,
-        mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(primaryQuery)}`,
+        mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(primaryQuery)}`
       });
     }
 
@@ -257,13 +295,17 @@ const analyzeHandler = async (req, res) => {
     const topCompetitor = allResults.find((r) => r.place_id !== userBusiness.place_id) || null;
 
     const detailsForUser = await mapsClient.placeDetails({
-      params: { place_id: userBusiness.place_id, fields: ["name", "rating", "user_ratings_total", "reviews"], key: MAPS },
-      timeout: 5000,
+      params: {
+        place_id: userBusiness.place_id,
+        fields: ["name", "rating", "user_ratings_total", "reviews"],
+        key: MAPS
+      },
+      timeout: 5000
     });
     const userDetails = detailsForUser.data.result || {};
     const googleData = {
       rating: userDetails.rating || 4.0,
-      reviewCount: userDetails.user_ratings_total || 0,
+      reviewCount: userDetails.user_ratings_total || 0
     };
     const reviewSnippets = (userDetails.reviews || []).slice(0, 5).map((r) => r.text || "");
 
@@ -272,8 +314,12 @@ const analyzeHandler = async (req, res) => {
     if (topCompetitor) {
       try {
         const competitorDetails = await mapsClient.placeDetails({
-          params: { place_id: topCompetitor.place_id, fields: ["name", "website"], key: MAPS },
-          timeout: 5000,
+          params: {
+            place_id: topCompetitor.place_id,
+            fields: ["name", "website"],
+            key: MAPS
+          },
+          timeout: 5000
         });
         const comp = competitorDetails.data.result || {};
         if (comp.website) {
@@ -317,11 +363,11 @@ Return ONLY a JSON object with keys:
   "reviewSentiment": "<biggest positive theme inferred from the review snippets>"
 }`.trim();
 
-    // Gemini with a 7s cap
+    // Guard Gemini with a 7s timeout
     const gen = await withTimeout(
       model.generateContent({
         contents: [{ role: "user", parts: [{ text: geminiPrompt }] }],
-        generationConfig: { maxOutputTokens: 1024 },
+        generationConfig: { maxOutputTokens: 1024 }
       }),
       7000,
       "Gemini timeout"
@@ -332,11 +378,7 @@ Return ONLY a JSON object with keys:
     if (!match) throw new Error("Gemini did not return JSON.");
     let geminiAnalysis = JSON.parse(match[0]);
 
-    const { finalScore, detailedScores } = calculateFinalScore(
-      googleData,
-      geminiAnalysis.scores || {},
-      businessType
-    );
+    const { finalScore, detailedScores } = calculateFinalScore(googleData, geminiAnalysis.scores || {}, businessType);
 
     console.log(`Analyze done in ${Date.now() - start}ms for "${businessName}"`);
     return res.status(200).json({
@@ -345,13 +387,15 @@ Return ONLY a JSON object with keys:
       detailedScores,
       geminiAnalysis,
       topCompetitor: topCompetitorData,
-      mapEmbedUrl,
+      mapEmbedUrl
     });
   } catch (error) {
     console.error("[analyze] FAIL", { msg: error?.message, stack: error?.stack });
+    // Final safety fallback: never 500 for users
     const MAPS = process.env.GOOGLE_MAPS_API_KEY;
     const q =
-      (req.body?.serviceArea ? `${req.body.businessName} ${req.body.serviceArea}` : req.body?.businessName) || "Unknown";
+      (req.body?.serviceArea ? `${req.body.businessName} ${req.body.serviceArea}` : req.body?.businessName) ||
+      "Unknown";
     return res.status(200).json({
       success: true,
       finalScore: 70,
@@ -361,16 +405,16 @@ Return ONLY a JSON object with keys:
         "Pain Point Resonance": 50,
         "Call-to-Action Strength": 50,
         "Website Health": 50,
-        "On-Page SEO": 50,
+        "On-Page SEO": 50
       },
       geminiAnalysis: {
         scores: {},
         topPriority: "Add your primary town and trade into the H1 and title tag.",
         competitorAdAnalysis: "LLM unavailable or timed out.",
-        reviewSentiment: "Not enough public reviews to summarize.",
+        reviewSentiment: "Not enough public reviews to summarize."
       },
       topCompetitor: null,
-      mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(q)}`,
+      mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(q)}`
     });
   }
 };
@@ -388,27 +432,27 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
     painPointResonance: clampPct(geminiScores.painPointResonance),
     ctaStrength: clampPct(geminiScores.ctaStrength),
     websiteHealth: clampPct(geminiScores.websiteHealth),
-    onPageSEO: clampPct(geminiScores.onPageSEO),
+    onPageSEO: clampPct(geminiScores.onPageSEO)
   };
 
   let final;
   if (businessType === "specialty") {
     final = Math.round(
       allScores.rating * 0.2 +
-      allScores.reviewVolume * 0.15 +
-      allScores.painPointResonance * 0.2 +
-      allScores.ctaStrength * 0.05 +
-      allScores.websiteHealth * 0.15 +
-      allScores.onPageSEO * 0.15
+        allScores.reviewVolume * 0.15 +
+        allScores.painPointResonance * 0.2 +
+        allScores.ctaStrength * 0.05 +
+        allScores.websiteHealth * 0.15 +
+        allScores.onPageSEO * 0.15
     );
   } else {
     final = Math.round(
       allScores.rating * 0.15 +
-      allScores.reviewVolume * 0.15 +
-      allScores.painPointResonance * 0.05 +
-      allScores.ctaStrength * 0.25 +
-      allScores.websiteHealth * 0.15 +
-      allScores.onPageSEO * 0.15
+        allScores.reviewVolume * 0.15 +
+        allScores.painPointResonance * 0.05 +
+        allScores.ctaStrength * 0.25 +
+        allScores.websiteHealth * 0.15 +
+        allScores.onPageSEO * 0.15
     );
   }
 
@@ -420,12 +464,12 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
       "Pain Point Resonance": allScores.painPointResonance,
       "Call-to-Action Strength": allScores.ctaStrength,
       "Website Health": allScores.websiteHealth,
-      "On-Page SEO": allScores.onPageSEO,
-    },
+      "On-Page SEO": allScores.onPageSEO
+    }
   };
 }
 
-// ---------- EXPORT / LOCAL ----------
+// ---------- EXPORT FOR VERCEL + LOCAL LISTEN ----------
 module.exports = serverless(app);
 
 if (!process.env.VERCEL) {
