@@ -19,23 +19,33 @@ const path = require("path");
 // ---------- CONFIG ----------
 const PORT = process.env.PORT || 3001;
 const ENABLE_AD_SCRAPE = /^true$/i.test(process.env.ENABLE_AD_SCRAPE || "false");
-const isVercel = !!process.env.VERCEL;
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
+// Keys (SPLIT)
+const MAPS_SERVER = process.env.GOOGLE_MAPS_API_KEY || "";        // server-side: Places, Geocoding, PSI
+const MAPS_EMBED  = process.env.GOOGLE_MAPS_EMBED_KEY || "";      // browser-side: Maps Embed (referrer-restricted)
 
 // ---------- APP ----------
 const app = express();
 app.set("trust proxy", 1);
 
-// Security headers (with CSP that allows Google Maps iframe)
+// Security headers (CSP allows Google Maps iframe & common image hosts)
 app.use(
   helmet({
-    // We embed an iframe from Google Maps; allow it explicitly.
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'"], // all JS must come from our origin (we load /widget.js)
-        styleSrc: ["'self'", "'unsafe-inline'"], // allow inline styles in widget.html
-        imgSrc: ["'self'", "data:"],
-        connectSrc: ["'self'"], // our frontend fetches only our own /api/*
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: [
+          "'self'",
+          "data:",
+          "https://*.ggpht.com",
+          "https://*.googleapis.com",
+          "https://*.googleusercontent.com",
+          "https://*.gstatic.com"
+        ],
+        connectSrc: ["'self'"],
         frameSrc: ["'self'", "https://www.google.com", "https://*.google.com"],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
@@ -43,12 +53,11 @@ app.use(
         upgradeInsecureRequests: []
       }
     },
-    // Some embed scenarios break with COEP/COOP; keep off for simplicity.
     crossOriginEmbedderPolicy: false
   })
 );
 
-// Allow all origins (this service is an API + static widget)
+// Allow all origins (API + static widget)
 app.use(cors());
 
 // JSON body parsing (keep small)
@@ -90,30 +99,35 @@ app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "..", "widget.html"));
 });
 
-// ---------- HEALTH (fast & zero deps) ----------
+// ---------- HEALTH ----------
 const healthHandler = (_req, res) =>
   res.json({
     ok: true,
-    mapsKeyPresent: Boolean(process.env.GOOGLE_MAPS_API_KEY),
+    mapsKeyPresent: Boolean(MAPS_SERVER),
+    embedKeyPresent: Boolean(MAPS_EMBED),
     geminiKeyPresent: Boolean(process.env.GEMINI_API_KEY),
     env: process.env.NODE_ENV || "unknown"
   });
+
 app.get("/api/health", healthHandler);
 app.get("/health", healthHandler);
 
-// ---------- CONFIG GUARD (after health) ----------
-app.use((req, res, next) => {
-  if (!process.env.GOOGLE_MAPS_API_KEY || !process.env.GEMINI_API_KEY) {
-    console.error("Missing required API keys");
-    return res.status(500).json({ error: "Server configuration missing API keys" });
+// ---------- ROUTE-SCOPED ENV CHECKS ----------
+function requireEnv(keys, res) {
+  const missing = keys.filter((k) => !process.env[k]);
+  if (missing.length) {
+    console.error("Missing env:", missing.join(", "));
+    res.status(500).json({ error: `Server configuration missing: ${missing.join(", ")}` });
+    return true;
   }
-  next();
-});
+  return false;
+}
 
 // ---------- CLIENTS ----------
 const mapsClient = new Client({});
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+const model =
+  process.env.GEMINI_API_KEY ? genAI.getGenerativeModel({ model: "gemini-1.5-pro" }) : null;
 
 // ---------- UTILS ----------
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
@@ -130,21 +144,48 @@ const isHttpUrl = (u) => {
 const withTimeout = (p, ms, label = "timeout") =>
   Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(label)), ms))]);
 
+const buildMapEmbedUrl = (qOrPlaceId) =>
+  MAPS_EMBED
+    ? `https://www.google.com/maps/embed/v1/place?key=${MAPS_EMBED}&q=${
+        String(qOrPlaceId).startsWith("place_id:") ? qOrPlaceId : encodeURIComponent(qOrPlaceId || "Business")
+      }`
+    : null;
+
+const errPayload = (e) => {
+  const status = e?.response?.status;
+  const data = e?.response?.data;
+  const dataStr =
+    typeof data === "string"
+      ? data.slice(0, 300)
+      : data
+      ? JSON.stringify(data).slice(0, 300)
+      : undefined;
+  return { msg: e?.message, status, data: dataStr, stack: e?.stack };
+};
+
+// ---------- PUPPETEER (Render-friendly) ----------
 let sharedBrowserPromise;
 async function getBrowser() {
   if (!sharedBrowserPromise) {
-    sharedBrowserPromise = puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      executablePath: isVercel ? await chromium.executablePath() : undefined,
-      headless: chromium.headless
-    });
+    sharedBrowserPromise = puppeteer
+      .launch({
+        args: chromium.args,
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(), // works on Render
+        headless: chromium.headless
+      })
+      .catch((err) => {
+        console.error("Browser launch failed:", err);
+        throw err;
+      });
   }
   return sharedBrowserPromise;
 }
 
 async function scrapeGoogleAds(domain) {
   if (!ENABLE_AD_SCRAPE) return [];
+  if (IS_PRODUCTION && !/^true$/i.test(process.env.ENABLE_AD_SCRAPE_IN_PROD || "false")) return [];
+
   let page;
   try {
     const browser = await getBrowser();
@@ -174,15 +215,19 @@ async function scrapeGoogleAds(domain) {
 const reverseHandler = async (req, res) => {
   const { lat, lon } = req.query;
   if (!lat || !lon) return res.status(400).json({ error: "Latitude and longitude are required." });
+
+  if (requireEnv(["GOOGLE_MAPS_API_KEY"], res)) return;
+
   try {
     const { data } = await mapsClient.reverseGeocode({
       params: {
         latlng: { lat: Number(lat), lng: Number(lon) },
         result_type: ["locality", "political"],
-        key: process.env.GOOGLE_MAPS_API_KEY
+        key: MAPS_SERVER
       },
       timeout: 5000
     });
+
     const result = (data.results || [])[0];
     if (!result) return res.status(404).json({ error: "Could not find city for coordinates." });
 
@@ -194,10 +239,11 @@ const reverseHandler = async (req, res) => {
     }
     return res.json({ cityState: [city, state].filter(Boolean).join(", ") });
   } catch (e) {
-    console.error("Reverse geocode error:", e.message);
+    console.error("Reverse geocode error:", errPayload(e));
     return res.status(500).json({ error: "Failed to reverse geocode." });
   }
 };
+
 app.get("/api/reverse", reverseHandler);
 app.get("/reverse", reverseHandler);
 
@@ -211,9 +257,9 @@ const analyzeHandler = async (req, res) => {
     req.query.quick === "1" || req.headers["x-quick"] === "1" || req.headers["x-skip-external"] === "1";
 
   if (quickMode) {
-    const MAPS = process.env.GOOGLE_MAPS_API_KEY || "";
     const effectiveServiceArea = (serviceArea || "").toString().trim();
     const q = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName;
+
     return res.status(200).json({
       success: true,
       finalScore: 70,
@@ -232,7 +278,7 @@ const analyzeHandler = async (req, res) => {
         reviewSentiment: "Quick mode: external calls skipped."
       },
       topCompetitor: null,
-      mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(q || "Business")}`
+      mapEmbedUrl: buildMapEmbedUrl(q) // *** uses EMBED key ***
     });
   }
 
@@ -247,7 +293,9 @@ const analyzeHandler = async (req, res) => {
     return res.status(400).json({ success: false, message: "Invalid businessType" });
   }
 
-  const MAPS = process.env.GOOGLE_MAPS_API_KEY;
+  // Full mode requires both keys
+  if (requireEnv(["GOOGLE_MAPS_API_KEY", "GEMINI_API_KEY"], res)) return;
+
   const effectiveServiceArea = (serviceArea || "").toString().trim();
   const primaryQuery = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName;
   const fallbackQuery = `${businessName} contractor`;
@@ -255,13 +303,15 @@ const analyzeHandler = async (req, res) => {
   try {
     // Google Places search (5s)
     let placesResponse = await mapsClient.textSearch({
-      params: { query: primaryQuery, key: MAPS },
+      params: { query: primaryQuery, key: MAPS_SERVER },
       timeout: 5000
     });
+
     let allResults = placesResponse.data.results || [];
+
     if (allResults.length === 0) {
       placesResponse = await mapsClient.textSearch({
-        params: { query: fallbackQuery, key: MAPS },
+        params: { query: fallbackQuery, key: MAPS_SERVER },
         timeout: 5000
       });
       allResults = placesResponse.data.results || [];
@@ -287,7 +337,7 @@ const analyzeHandler = async (req, res) => {
           reviewSentiment: "Not enough public reviews to summarize."
         },
         topCompetitor: null,
-        mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(primaryQuery)}`
+        mapEmbedUrl: buildMapEmbedUrl(primaryQuery) // *** uses EMBED key ***
       });
     }
 
@@ -298,10 +348,11 @@ const analyzeHandler = async (req, res) => {
       params: {
         place_id: userBusiness.place_id,
         fields: ["name", "rating", "user_ratings_total", "reviews"],
-        key: MAPS
+        key: MAPS_SERVER
       },
       timeout: 5000
     });
+
     const userDetails = detailsForUser.data.result || {};
     const googleData = {
       rating: userDetails.rating || 4.0,
@@ -317,10 +368,11 @@ const analyzeHandler = async (req, res) => {
           params: {
             place_id: topCompetitor.place_id,
             fields: ["name", "website"],
-            key: MAPS
+            key: MAPS_SERVER
           },
           timeout: 5000
         });
+
         const comp = competitorDetails.data.result || {};
         if (comp.website) {
           topCompetitorData = { name: comp.name || topCompetitor.name, website: comp.website };
@@ -335,9 +387,13 @@ const analyzeHandler = async (req, res) => {
     }
 
     const searchQuery = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : `${businessName}`;
-    const mapEmbedUrl = `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(searchQuery)}`;
+    const embedTarget = userBusiness?.place_id ? `place_id:${userBusiness.place_id}` : searchQuery;
+    const mapEmbedUrl = buildMapEmbedUrl(embedTarget); // *** uses EMBED key ***
 
-    const geminiPrompt = `
+    // Gemini (7s timeout) - only if model exists
+    let geminiAnalysis = { scores: {}, topPriority: "", competitorAdAnalysis: "", reviewSentiment: "" };
+    if (model) {
+      const prompt = `
 Analyze a local contractor:
 - Business: "${businessName}"
 - Market: "${effectiveServiceArea || "unknown"}"
@@ -363,20 +419,23 @@ Return ONLY a JSON object with keys:
   "reviewSentiment": "<biggest positive theme inferred from the review snippets>"
 }`.trim();
 
-    // Guard Gemini with a 7s timeout
-    const gen = await withTimeout(
-      model.generateContent({
-        contents: [{ role: "user", parts: [{ text: geminiPrompt }] }],
-        generationConfig: { maxOutputTokens: 1024 }
-      }),
-      7000,
-      "Gemini timeout"
-    );
+      const gen = await withTimeout(
+        model.generateContent({
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 1024 }
+        }),
+        7000,
+        "Gemini timeout"
+      );
 
-    let raw = gen.response.text() || "";
-    const match = raw.match(/{[\s\S]*}/);
-    if (!match) throw new Error("Gemini did not return JSON.");
-    let geminiAnalysis = JSON.parse(match[0]);
+      try {
+        const raw = gen.response.text() || "";
+        const match = raw.match(/{[\s\S]*}/);
+        if (match) geminiAnalysis = JSON.parse(match[0]);
+      } catch (e) {
+        console.warn("Gemini parse failed:", e.message);
+      }
+    }
 
     const { finalScore, detailedScores } = calculateFinalScore(googleData, geminiAnalysis.scores || {}, businessType);
 
@@ -390,12 +449,11 @@ Return ONLY a JSON object with keys:
       mapEmbedUrl
     });
   } catch (error) {
-    console.error("[analyze] FAIL", { msg: error?.message, stack: error?.stack });
-    // Final safety fallback: never 500 for users
-    const MAPS = process.env.GOOGLE_MAPS_API_KEY;
+    console.error("[analyze] FAIL", errPayload(error));
     const q =
       (req.body?.serviceArea ? `${req.body.businessName} ${req.body.serviceArea}` : req.body?.businessName) ||
       "Unknown";
+
     return res.status(200).json({
       success: true,
       finalScore: 70,
@@ -414,10 +472,11 @@ Return ONLY a JSON object with keys:
         reviewSentiment: "Not enough public reviews to summarize."
       },
       topCompetitor: null,
-      mapEmbedUrl: `https://www.google.com/maps/embed/v1/place?key=${MAPS}&q=${encodeURIComponent(q)}`
+      mapEmbedUrl: buildMapEmbedUrl(q) // *** uses EMBED key ***
     });
   }
 };
+
 app.post("/api/analyze", analyzeHandler);
 app.post("/analyze", analyzeHandler);
 
@@ -473,7 +532,13 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
 module.exports = serverless(app);
 
 if (!process.env.VERCEL) {
-  app.listen(PORT, () =>
-    console.log(`Local server on http://localhost:${PORT} (ads scrape: ${ENABLE_AD_SCRAPE ? "on" : "off"})`)
-  );
+  app
+    .listen(PORT, () =>
+      console.log(
+        `Local server on http://localhost:${PORT} (ads scrape: ${ENABLE_AD_SCRAPE ? (IS_PRODUCTION ? "prod-guarded" : "on") : "off"})`
+      )
+    )
+    .on("error", (err) => {
+      console.error("Server listen failed:", err);
+    });
 }
