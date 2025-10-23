@@ -163,6 +163,95 @@ const errPayload = (e) => {
   return { msg: e?.message, status, data: dataStr, stack: e?.stack };
 };
 
+// ---------- PLACE MATCH HELPERS ----------
+const normalizeHost = (h) =>
+  (h || "").toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*/, "");
+
+async function geocodeServiceAreaForBias(serviceArea) {
+  if (!serviceArea) return null;
+  try {
+    const { data } = await mapsClient.geocode({
+      params: { address: serviceArea, region: "us", key: MAPS_SERVER },
+      timeout: 5000
+    });
+    const loc = data?.results?.[0]?.geometry?.location;
+    return loc ? { lat: loc.lat, lng: loc.lng } : null;
+  } catch (e) {
+    console.log("Geocode bias failed:", errPayload(e));
+    return null;
+  }
+}
+
+// Prefer FindPlaceFromText with a tight bias; falls back to TextSearch.
+async function resolvePlaceCandidates({ businessName, serviceArea }) {
+  const input = [businessName, serviceArea].filter(Boolean).join(" ").trim();
+  const bias = await geocodeServiceAreaForBias(serviceArea);
+
+  // Try FindPlaceFromText first (precise + fast)
+  try {
+    const params = {
+      input,
+      inputtype: "textquery",
+      fields: ["place_id", "name", "formatted_address", "website"],
+      region: "us",
+      key: MAPS_SERVER
+    };
+    if (bias) params.locationbias = { circle: { center: bias, radius: 5000 } }; // ~5km
+    const { data } = await mapsClient.findPlaceFromText({ params, timeout: 5000 });
+    if (data?.candidates?.length) return data.candidates;
+  } catch (e) {
+    console.log("FindPlace miss:", errPayload(e));
+  }
+
+  // Fallback: TextSearch (broader)
+  try {
+    const { data } = await mapsClient.textSearch({
+      params: { query: input, region: "us", key: MAPS_SERVER },
+      timeout: 5000
+    });
+    return data?.results || [];
+  } catch (e) {
+    console.log("TextSearch miss:", errPayload(e));
+    return [];
+  }
+}
+
+async function fetchPlaceDetails(placeId) {
+  try {
+    const { data } = await mapsClient.placeDetails({
+      params: {
+        place_id: placeId,
+        fields: ["name", "website", "rating", "user_ratings_total", "formatted_address"],
+        key: MAPS_SERVER
+      },
+      timeout: 5000
+    });
+    return data?.result || null;
+  } catch (e) {
+    console.log("PlaceDetails miss:", errPayload(e));
+    return null;
+  }
+}
+
+function pickBestCandidateByWebsite(candidates, websiteUrl) {
+  if (!candidates?.length) return null;
+  if (!websiteUrl) return candidates[0];
+
+  let targetHost = null;
+  try {
+    targetHost = normalizeHost(new URL(websiteUrl).hostname);
+  } catch {
+    targetHost = normalizeHost(websiteUrl);
+  }
+  if (!targetHost) return candidates[0];
+
+  const exact = candidates.find((c) => c.website && normalizeHost(c.website) === targetHost);
+  if (exact) return exact;
+
+  const loose = candidates.find((c) => c.website && normalizeHost(c.website).includes(targetHost));
+  return loose || candidates[0];
+}
+
 // ---------- PUPPETEER (Render-friendly) ----------
 let sharedBrowserPromise;
 async function getBrowser() {
@@ -247,7 +336,7 @@ const reverseHandler = async (req, res) => {
 app.get("/api/reverse", reverseHandler);
 app.get("/reverse", reverseHandler);
 
-// ---------- ANALYZE ----------
+// ---------- ANALYZE (improved) ----------
 const analyzeHandler = async (req, res) => {
   const start = Date.now();
   const { businessName, websiteUrl, businessType, serviceArea } = req.body || {};
@@ -278,7 +367,7 @@ const analyzeHandler = async (req, res) => {
         reviewSentiment: "Quick mode: external calls skipped."
       },
       topCompetitor: null,
-      mapEmbedUrl: buildMapEmbedUrl(q) // *** uses EMBED key ***
+      mapEmbedUrl: buildMapEmbedUrl(q)
     });
   }
 
@@ -286,7 +375,11 @@ const analyzeHandler = async (req, res) => {
   if (!businessName || !websiteUrl || !businessType) {
     return res.status(400).json({ success: false, message: "Missing required fields." });
   }
-  if (!isHttpUrl(websiteUrl)) {
+  // Accept bare domains by normalizing to https://
+  const normalizedWebsite = isHttpUrl(websiteUrl)
+    ? websiteUrl
+    : `https://${websiteUrl.replace(/^\/*/, "")}`;
+  if (!isHttpUrl(normalizedWebsite)) {
     return res.status(400).json({ success: false, message: "Invalid websiteUrl" });
   }
   if (!["specialty", "maintenance"].includes(businessType)) {
@@ -297,28 +390,14 @@ const analyzeHandler = async (req, res) => {
   if (requireEnv(["GOOGLE_MAPS_API_KEY", "GEMINI_API_KEY"], res)) return;
 
   const effectiveServiceArea = (serviceArea || "").toString().trim();
-  const primaryQuery = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName;
-  const fallbackQuery = `${businessName} contractor`;
 
   try {
-    // Google Places search (5s)
-    let placesResponse = await mapsClient.textSearch({
-      params: { query: primaryQuery, key: MAPS_SERVER },
-      timeout: 5000
-    });
+    // Resolve candidates, pick best by website host
+    const candidates = await resolvePlaceCandidates({ businessName, serviceArea: effectiveServiceArea });
 
-    let allResults = placesResponse.data.results || [];
-
-    if (allResults.length === 0) {
-      placesResponse = await mapsClient.textSearch({
-        params: { query: fallbackQuery, key: MAPS_SERVER },
-        timeout: 5000
-      });
-      allResults = placesResponse.data.results || [];
-    }
-
-    // If still nothing, return a safe canned result
-    if (allResults.length === 0) {
+    if (!candidates.length) {
+      // Graceful fallback
+      const q = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName;
       return res.status(200).json({
         success: true,
         finalScore: 70,
@@ -337,60 +416,46 @@ const analyzeHandler = async (req, res) => {
           reviewSentiment: "Not enough public reviews to summarize."
         },
         topCompetitor: null,
-        mapEmbedUrl: buildMapEmbedUrl(primaryQuery) // *** uses EMBED key ***
+        mapEmbedUrl: buildMapEmbedUrl(q)
       });
     }
 
-    const userBusiness = allResults[0];
-    const topCompetitor = allResults.find((r) => r.place_id !== userBusiness.place_id) || null;
+    const picked = pickBestCandidateByWebsite(candidates, normalizedWebsite);
+    const userDetails = picked?.place_id ? await fetchPlaceDetails(picked.place_id) : null;
 
-    const detailsForUser = await mapsClient.placeDetails({
-      params: {
-        place_id: userBusiness.place_id,
-        fields: ["name", "rating", "user_ratings_total", "reviews"],
-        key: MAPS_SERVER
-      },
-      timeout: 5000
-    });
-
-    const userDetails = detailsForUser.data.result || {};
     const googleData = {
-      rating: userDetails.rating || 4.0,
-      reviewCount: userDetails.user_ratings_total || 0
+      rating: userDetails?.rating ?? 0,
+      reviewCount: userDetails?.user_ratings_total ?? 0
     };
-    const reviewSnippets = (userDetails.reviews || []).slice(0, 5).map((r) => r.text || "");
 
+    // competitor (2nd candidate)
     let topCompetitorData = null;
     let competitorAds = [];
-    if (topCompetitor) {
+    const competitorCandidate = candidates.find((c) => c.place_id && c.place_id !== picked.place_id);
+    if (competitorCandidate) {
       try {
-        const competitorDetails = await mapsClient.placeDetails({
-          params: {
-            place_id: topCompetitor.place_id,
-            fields: ["name", "website"],
-            key: MAPS_SERVER
-          },
-          timeout: 5000
-        });
-
-        const comp = competitorDetails.data.result || {};
-        if (comp.website) {
-          topCompetitorData = { name: comp.name || topCompetitor.name, website: comp.website };
-          const domain = new URL(comp.website).hostname;
-          competitorAds = await scrapeGoogleAds(domain);
+        const cd = await fetchPlaceDetails(competitorCandidate.place_id);
+        if (cd?.website) {
+          topCompetitorData = { name: cd.name || competitorCandidate.name, website: cd.website };
+          try {
+            const domain = new URL(cd.website).hostname;
+            competitorAds = await scrapeGoogleAds(domain);
+          } catch {}
         } else {
-          topCompetitorData = { name: comp.name || topCompetitor.name, website: null };
+          topCompetitorData = { name: cd?.name || competitorCandidate.name, website: null };
         }
       } catch (e) {
-        console.log("Competitor details scrape skipped:", e.message);
+        console.log("Competitor details skipped:", e.message);
       }
     }
 
-    const searchQuery = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : `${businessName}`;
-    const embedTarget = userBusiness?.place_id ? `place_id:${userBusiness.place_id}` : searchQuery;
-    const mapEmbedUrl = buildMapEmbedUrl(embedTarget); // *** uses EMBED key ***
+    // map embed
+    const embedTarget = picked?.place_id
+      ? `place_id:${picked.place_id}`
+      : (effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName);
+    const mapEmbedUrl = buildMapEmbedUrl(embedTarget);
 
-    // Gemini (7s timeout) - only if model exists
+    // Gemini
     let geminiAnalysis = { scores: {}, topPriority: "", competitorAdAnalysis: "", reviewSentiment: "" };
     if (model) {
       const prompt = `
@@ -398,25 +463,18 @@ Analyze a local contractor:
 - Business: "${businessName}"
 - Market: "${effectiveServiceArea || "unknown"}"
 - Model: "${businessType}"
-- Website: "${websiteUrl}"
+- Website: "${normalizedWebsite}"
 
-Recent public review snippets (up to 5):
-${JSON.stringify(reviewSnippets)}
-
+No more than 5 recent public review snippets are available.
 Top competitor: "${topCompetitorData?.name || "unknown"}"
 Competitor ads (first 3, if any): ${JSON.stringify(competitorAds)}
 
-Return ONLY a JSON object with keys:
+Return ONLY JSON:
 {
-  "scores": {
-    "painPointResonance": 0-100,
-    "ctaStrength": 0-100,
-    "websiteHealth": 0-100,
-    "onPageSEO": 0-100
-  },
-  "topPriority": "<single most actionable next step tailored for the market>",
-  "competitorAdAnalysis": "<themes/offers from their ads or a suggested angle>",
-  "reviewSentiment": "<biggest positive theme inferred from the review snippets>"
+  "scores": { "painPointResonance": 0-100, "ctaStrength": 0-100, "websiteHealth": 0-100, "onPageSEO": 0-100 },
+  "topPriority": "...",
+  "competitorAdAnalysis": "...",
+  "reviewSentiment": "..."
 }`.trim();
 
       const gen = await withTimeout(
@@ -427,7 +485,6 @@ Return ONLY a JSON object with keys:
         7000,
         "Gemini timeout"
       );
-
       try {
         const raw = gen.response.text() || "";
         const match = raw.match(/{[\s\S]*}/);
@@ -437,9 +494,18 @@ Return ONLY a JSON object with keys:
       }
     }
 
-    const { finalScore, detailedScores } = calculateFinalScore(googleData, geminiAnalysis.scores || {}, businessType);
+    const { finalScore, detailedScores } = calculateFinalScore(
+      googleData,
+      geminiAnalysis.scores || {},
+      businessType
+    );
 
-    console.log(`Analyze done in ${Date.now() - start}ms for "${businessName}"`);
+    console.log(`Analyze done in ${Date.now() - start}ms for "${businessName}"`, {
+      placeId: picked?.place_id,
+      rating: googleData.rating,
+      reviews: googleData.reviewCount
+    });
+
     return res.status(200).json({
       success: true,
       finalScore,
@@ -451,9 +517,7 @@ Return ONLY a JSON object with keys:
   } catch (error) {
     console.error("[analyze] FAIL", errPayload(error));
     const q =
-      (req.body?.serviceArea ? `${req.body.businessName} ${req.body.serviceArea}` : req.body?.businessName) ||
-      "Unknown";
-
+      effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : (businessName || "Unknown");
     return res.status(200).json({
       success: true,
       finalScore: 70,
@@ -472,7 +536,7 @@ Return ONLY a JSON object with keys:
         reviewSentiment: "Not enough public reviews to summarize."
       },
       topCompetitor: null,
-      mapEmbedUrl: buildMapEmbedUrl(q) // *** uses EMBED key ***
+      mapEmbedUrl: buildMapEmbedUrl(q)
     });
   }
 };

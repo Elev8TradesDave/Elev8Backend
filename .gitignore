@@ -1,9 +1,2 @@
-# Ignore the file with our secret keys
-.env
-
-# Ignore the folder with all the downloaded code
-node_modules/
-
 node_modules/
 .env
-.vercel

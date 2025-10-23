@@ -8,22 +8,12 @@
     :root { color-scheme: light dark; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; line-height: 1.45; }
     .form { max-width: 720px; margin: 0 auto; }
-    .row { margin: 12px 0; }
-    label { display:block; margin-bottom: 6px; font-weight: 600; }
-    input[type="text"], input[type="url"] { width:100%; padding:10px; border:1px solid #ccc; border-radius:8px; }
-    .radio-row { display:flex; gap:12px; }
-    .controls { display:flex; gap:16px; align-items:center; margin-top:8px; }
-    button { padding:12px 16px; border-radius:10px; border:0; background:#2563eb; color:#fff; cursor:pointer; font-weight:600; }
-    button[disabled] { opacity: .6; cursor: not-allowed; }
-    #results { display:none; max-width: 720px; margin: 24px auto; }
-    .score-display { display:flex; align-items:center; gap:16px; margin-bottom:8px; }
-    .score-display .label { font-weight:600; color:#555; }
-    .score-display .score { font-size:42px; font-weight:800; }
-    .info-box { background:#f3f4f6; border-radius:12px; padding:14px 16px; margin:14px 0; }
-    .info-title { font-weight:700; margin-bottom:6px; }
-    .bar-chart { margin: 16px 0; }
-    .bar-row { display:grid; grid-template-columns: 180px 1fr 48px; align-items:center; gap:10px; margin: 8px 0; }
-    .bar-label { font-size: 14px; color:#333; }
+    .row { margin: 12px 0; display: grid; gap: 6px; }
+    .radio-row { display: flex; gap: 16px; }
+    .controls { display: flex; align-items: center; gap: 16px; }
+    button { padding: 10px 14px; border: 0; border-radius: 10px; background:#111827; color:white; cursor:pointer; }
+    input, select { padding: 8px 10px; border-radius: 8px; border: 1px solid #d1d5db; }
+    .score { font-weight: 700; font-size: 20px; margin: 16px 0 8px; }
     .bar-container { background:#e5e7eb; border-radius:10px; height:10px; position:relative; overflow:hidden; }
     .bar { height:100%; background:#10b981; }
     .bar-value { text-align:right; }
@@ -42,13 +32,13 @@
     <form id="analysisForm" novalidate>
       <div class="row">
         <label for="businessName">Business Name *</label>
-        <input id="businessName" type="text" placeholder="Acme Plumbing" required autocomplete="organization" />
+        <input id="businessName" type="text" placeholder="Reuther Materials" required autocomplete="organization" />
       </div>
 
       <div class="row">
         <label for="websiteUrl">Website URL *</label>
-        <input id="websiteUrl" type="url" placeholder="https://example.com" required inputmode="url" autocomplete="url" />
-        <div class="hint">Must start with <code>http://</code> or <code>https://</code></div>
+        <input id="websiteUrl" type="url" placeholder="reuthermaterial.com" required inputmode="url" autocomplete="url" />
+        <div class="hint">You can paste just the domain — no need for https://</div>
       </div>
 
       <div class="row">
@@ -61,7 +51,7 @@
 
       <div class="row">
         <label for="serviceArea">Primary Service Area (City/County/Region)</label>
-        <input id="serviceArea" type="text" placeholder="Middlesex County, NJ" autocomplete="address-level2" />
+        <input id="serviceArea" type="text" placeholder="North Bergen, NJ" autocomplete="address-level2" />
       </div>
 
       <div class="row controls">
@@ -71,6 +61,7 @@
           Fast test mode
         </label>
       </div>
+
       <div id="formError" class="hint error" role="alert" style="display:none;"></div>
     </form>
   </div>
