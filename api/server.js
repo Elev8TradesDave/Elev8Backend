@@ -175,7 +175,7 @@ async function geocodeServiceAreaForBias(serviceArea) {
       timeout: 5000
     });
     const loc = data?.results?.[0]?.geometry?.location;
-    return loc ? { lat: loc.lat, lng: loc.lng } : null;
+    return loc ? ({ lat: loc.lat, lng: loc.lng }) : null;
   } catch (e) {
     console.log("Geocode bias failed:", errPayload(e));
     return null;
@@ -192,11 +192,14 @@ async function resolvePlaceCandidates({ businessName, serviceArea }) {
     const params = {
       input,
       inputtype: "textquery",
-      fields: ["place_id", "name", "formatted_address", "website"],
+      // IMPORTANT: 'website' is NOT supported for FindPlaceFromText
+      fields: ["place_id", "name", "formatted_address"],
       region: "us",
       key: MAPS_SERVER
     };
-    if (bias) params.locationbias = { circle: { center: bias, radius: 5000 } }; // ~5km
+    // REST format: "circle:5000@lat,lng"
+    if (bias) params.locationbias = `circle:5000@${bias.lat},${bias.lng}`;
+
     const { data } = await mapsClient.findPlaceFromText({ params, timeout: 5000 });
     if (data?.candidates?.length) return data.candidates;
   } catch (e) {
@@ -320,8 +323,7 @@ const reverseHandler = async (req, res) => {
     const result = (data.results || [])[0];
     if (!result) return res.status(404).json({ error: "Could not find city for coordinates." });
 
-    let city = "",
-      state = "";
+    let city = "", state = "";
     for (const c of result.address_components) {
       if (c.types.includes("locality")) city = c.long_name;
       if (c.types.includes("administrative_area_level_1")) state = c.short_name;
@@ -487,7 +489,7 @@ Return ONLY JSON:
       );
       try {
         const raw = gen.response.text() || "";
-        const match = raw.match(/{[\s\S]*}/);
+               const match = raw.match(/{[\s\S]*}/);
         if (match) geminiAnalysis = JSON.parse(match[0]);
       } catch (e) {
         console.warn("Gemini parse failed:", e.message);
