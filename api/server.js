@@ -22,14 +22,13 @@ const ENABLE_AD_SCRAPE = /^true$/i.test(process.env.ENABLE_AD_SCRAPE || "false")
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
 // Keys (SPLIT)
-const MAPS_SERVER = process.env.GOOGLE_MAPS_API_KEY || "";        // server-side: Places, Geocoding, PSI
-const MAPS_EMBED  = process.env.GOOGLE_MAPS_EMBED_KEY || "";      // browser-side: Maps Embed (referrer-restricted)
+const MAPS_SERVER = process.env.GOOGLE_MAPS_API_KEY || "";        // server: Places, Geocoding
+const MAPS_EMBED  = process.env.GOOGLE_MAPS_EMBED_KEY || "";      // browser: Maps Embed (referrer-restricted)
 
 // ---------- APP ----------
 const app = express();
 app.set("trust proxy", 1);
 
-// Security headers (CSP allows Google Maps iframe & common image hosts)
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -57,13 +56,8 @@ app.use(
   })
 );
 
-// Allow all origins (API + static widget)
 app.use(cors());
-
-// JSON body parsing (keep small)
 app.use(express.json({ limit: "200kb" }));
-
-// Serve static assets from repo root (so /widget.js loads)
 app.use(express.static(path.join(__dirname, "..")));
 
 // ---------- RATE LIMIT (IPv6-safe key) ----------
@@ -175,7 +169,7 @@ async function geocodeServiceAreaForBias(serviceArea) {
       timeout: 5000
     });
     const loc = data?.results?.[0]?.geometry?.location;
-    return loc ? ({ lat: loc.lat, lng: loc.lng }) : null;
+    return loc ? { lat: loc.lat, lng: loc.lng } : null;
   } catch (e) {
     console.log("Geocode bias failed:", errPayload(e));
     return null;
@@ -192,7 +186,7 @@ async function resolvePlaceCandidates({ businessName, serviceArea }) {
     const params = {
       input,
       inputtype: "textquery",
-      // IMPORTANT: 'website' is NOT supported for FindPlaceFromText
+      // IMPORTANT: 'website' is NOT supported here
       fields: ["place_id", "name", "formatted_address"],
       region: "us",
       key: MAPS_SERVER
@@ -237,6 +231,7 @@ async function fetchPlaceDetails(placeId) {
 }
 
 function pickBestCandidateByWebsite(candidates, websiteUrl) {
+  // Most FindPlace/TextSearch candidates won't include website; we'll still prefer the first.
   if (!candidates?.length) return null;
   if (!websiteUrl) return candidates[0];
 
@@ -248,6 +243,7 @@ function pickBestCandidateByWebsite(candidates, websiteUrl) {
   }
   if (!targetHost) return candidates[0];
 
+  // If any candidate has website (e.g., from TextSearch or later augmentation), try to match.
   const exact = candidates.find((c) => c.website && normalizeHost(c.website) === targetHost);
   if (exact) return exact;
 
@@ -338,7 +334,7 @@ const reverseHandler = async (req, res) => {
 app.get("/api/reverse", reverseHandler);
 app.get("/reverse", reverseHandler);
 
-// ---------- ANALYZE (improved) ----------
+// ---------- ANALYZE ----------
 const analyzeHandler = async (req, res) => {
   const start = Date.now();
   const { businessName, websiteUrl, businessType, serviceArea } = req.body || {};
@@ -375,7 +371,7 @@ const analyzeHandler = async (req, res) => {
 
   // Validate input for full run
   if (!businessName || !websiteUrl || !businessType) {
-    return res.status(400).json({ success: false, message: "Missing required fields." });
+    return res.status(400).json({ success: false, message: "Please complete all required fields." });
   }
   // Accept bare domains by normalizing to https://
   const normalizedWebsite = isHttpUrl(websiteUrl)
@@ -388,17 +384,16 @@ const analyzeHandler = async (req, res) => {
     return res.status(400).json({ success: false, message: "Invalid businessType" });
   }
 
-  // Full mode requires both keys
-  if (requireEnv(["GOOGLE_MAPS_API_KEY", "GEMINI_API_KEY"], res)) return;
+  // Full mode requires Maps; Gemini is optional
+  if (requireEnv(["GOOGLE_MAPS_API_KEY"], res)) return;
 
   const effectiveServiceArea = (serviceArea || "").toString().trim();
 
   try {
-    // Resolve candidates, pick best by website host
+    // Resolve candidates, pick best by website host (if available)
     const candidates = await resolvePlaceCandidates({ businessName, serviceArea: effectiveServiceArea });
 
     if (!candidates.length) {
-      // Graceful fallback
       const q = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName;
       return res.status(200).json({
         success: true,
@@ -430,7 +425,7 @@ const analyzeHandler = async (req, res) => {
       reviewCount: userDetails?.user_ratings_total ?? 0
     };
 
-    // competitor (2nd candidate)
+    // Competitor: take next candidate if available
     let topCompetitorData = null;
     let competitorAds = [];
     const competitorCandidate = candidates.find((c) => c.place_id && c.place_id !== picked.place_id);
@@ -451,13 +446,13 @@ const analyzeHandler = async (req, res) => {
       }
     }
 
-    // map embed
+    // Map embed
     const embedTarget = picked?.place_id
       ? `place_id:${picked.place_id}`
       : (effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName);
     const mapEmbedUrl = buildMapEmbedUrl(embedTarget);
 
-    // Gemini
+    // Gemini (optional)
     let geminiAnalysis = { scores: {}, topPriority: "", competitorAdAnalysis: "", reviewSentiment: "" };
     if (model) {
       const prompt = `
@@ -467,16 +462,12 @@ Analyze a local contractor:
 - Model: "${businessType}"
 - Website: "${normalizedWebsite}"
 
-No more than 5 recent public review snippets are available.
-Top competitor: "${topCompetitorData?.name || "unknown"}"
-Competitor ads (first 3, if any): ${JSON.stringify(competitorAds)}
-
 Return ONLY JSON:
 {
   "scores": { "painPointResonance": 0-100, "ctaStrength": 0-100, "websiteHealth": 0-100, "onPageSEO": 0-100 },
-  "topPriority": "...",
-  "competitorAdAnalysis": "...",
-  "reviewSentiment": "..."
+  "topPriority": "<one actionable next step>",
+  "competitorAdAnalysis": "<themes/offers>",
+  "reviewSentiment": "<biggest positive theme>"
 }`.trim();
 
       const gen = await withTimeout(
@@ -489,7 +480,7 @@ Return ONLY JSON:
       );
       try {
         const raw = gen.response.text() || "";
-               const match = raw.match(/{[\s\S]*}/);
+        const match = raw.match(/{[\s\S]*}/);
         if (match) geminiAnalysis = JSON.parse(match[0]);
       } catch (e) {
         console.warn("Gemini parse failed:", e.message);
@@ -548,48 +539,47 @@ app.post("/analyze", analyzeHandler);
 
 // ---------- SCORING ----------
 function calculateFinalScore(googleData, geminiScores, businessType) {
+  // Core signals from Google
   const ratingScore = clampPct((Number(googleData.rating || 0) / 5) * 100);
   const reviewScore = clampPct(Math.min(Number(googleData.reviewCount || 0) / 150, 1) * 100);
 
-  const allScores = {
-    rating: ratingScore,
-    reviewVolume: reviewScore,
-    painPointResonance: clampPct(geminiScores.painPointResonance),
-    ctaStrength: clampPct(geminiScores.ctaStrength),
-    websiteHealth: clampPct(geminiScores.websiteHealth),
-    onPageSEO: clampPct(geminiScores.onPageSEO)
-  };
+  const hasGemini =
+    geminiScores &&
+    ["painPointResonance", "ctaStrength", "websiteHealth", "onPageSEO"]
+      .some(k => Number.isFinite(Number(geminiScores[k])));
 
-  let final;
-  if (businessType === "specialty") {
-    final = Math.round(
-      allScores.rating * 0.2 +
-        allScores.reviewVolume * 0.15 +
-        allScores.painPointResonance * 0.2 +
-        allScores.ctaStrength * 0.05 +
-        allScores.websiteHealth * 0.15 +
-        allScores.onPageSEO * 0.15
-    );
-  } else {
-    final = Math.round(
-      allScores.rating * 0.15 +
-        allScores.reviewVolume * 0.15 +
-        allScores.painPointResonance * 0.05 +
-        allScores.ctaStrength * 0.25 +
-        allScores.websiteHealth * 0.15 +
-        allScores.onPageSEO * 0.15
-    );
-  }
+  const painPointResonance = hasGemini ? clampPct(geminiScores.painPointResonance) : null;
+  const ctaStrength        = hasGemini ? clampPct(geminiScores.ctaStrength)        : null;
+  const websiteHealth      = hasGemini ? clampPct(geminiScores.websiteHealth)      : null;
+  const onPageSEO          = hasGemini ? clampPct(geminiScores.onPageSEO)          : null;
+
+  // Baseline weights when all metrics present
+  const fullWeights = (businessType === "maintenance")
+    ? { rating: 0.15, review: 0.15, pain: 0.05, cta: 0.25, web: 0.15, seo: 0.15 }
+    : { rating: 0.20, review: 0.15, pain: 0.20, cta: 0.05, web: 0.15, seo: 0.15 };
+
+  // Use only available metrics; renormalize weights to 1
+  const metrics = [
+    { key: "rating", val: ratingScore,        w: fullWeights.rating },
+    { key: "review", val: reviewScore,        w: fullWeights.review },
+    { key: "pain",   val: painPointResonance, w: fullWeights.pain },
+    { key: "cta",    val: ctaStrength,        w: fullWeights.cta },
+    { key: "web",    val: websiteHealth,      w: fullWeights.web },
+    { key: "seo",    val: onPageSEO,          w: fullWeights.seo }
+  ].filter(m => m.val !== null && Number.isFinite(m.val));
+
+  const totalW = metrics.reduce((s, m) => s + m.w, 0) || 1;
+  const final = Math.round(metrics.reduce((s, m) => s + (m.val * (m.w / totalW)), 0));
 
   return {
     finalScore: Math.min(final || 70, 99),
     detailedScores: {
-      "Overall Rating": allScores.rating,
-      "Review Volume": allScores.reviewVolume,
-      "Pain Point Resonance": allScores.painPointResonance,
-      "Call-to-Action Strength": allScores.ctaStrength,
-      "Website Health": allScores.websiteHealth,
-      "On-Page SEO": allScores.onPageSEO
+      "Overall Rating": ratingScore,
+      "Review Volume": reviewScore,
+      "Pain Point Resonance": painPointResonance ?? 0,
+      "Call-to-Action Strength": ctaStrength ?? 0,
+      "Website Health": websiteHealth ?? 0,
+      "On-Page SEO": onPageSEO ?? 0
     }
   };
 }
