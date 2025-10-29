@@ -1,73 +1,120 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Elev8Trades Analysis</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; line-height: 1.45; }
-    .form { max-width: 720px; margin: 0 auto; }
-    .row { margin: 12px 0; display: grid; gap: 6px; }
-    .radio-row { display: flex; gap: 16px; }
-    .controls { display: flex; align-items: center; gap: 16px; }
-    button { padding: 10px 14px; border: 0; border-radius: 10px; background:#111827; color:white; cursor:pointer; }
-    input, select { padding: 8px 10px; border-radius: 8px; border: 1px solid #d1d5db; }
-    .score { font-weight: 700; font-size: 20px; margin: 16px 0 8px; }
-    .bar-container { background:#e5e7eb; border-radius:10px; height:10px; position:relative; overflow:hidden; }
-    .bar { height:100%; background:#10b981; }
-    .bar-value { text-align:right; }
-    .map-container { margin-top:16px; aspect-ratio: 16 / 9; }
-    .map-container iframe { width: 100%; height: 100%; border:0; border-radius: 12px; }
-    details { margin-top: 12px; }
-    .logic-explainer { white-space: pre-wrap; color:#444; }
-    .hint { font-size: 12px; color:#666; margin-top:4px; }
-    .error { color:#b91c1c; }
-  </style>
-</head>
-<body>
-  <div class="form">
-    <h1>Elev8Trades Analysis</h1>
+// Works on Render and localhost
+const API_PATH = "/api/analyze";
 
-    <form id="analysisForm" novalidate>
+function esc(s) { return String(s ?? "").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+function normalizeWebsite(raw) {
+  let v = (raw || "").trim();
+  if (!v) return "";
+  try {
+    const u = new URL(v);
+    u.protocol = "https:";                 // force https
+    return u.toString().replace(/\/+$/, "");
+  } catch {
+    return ("https://" + v.replace(/^\/*/, "")).replace(/\/+$/, "");
+  }
+}
+
+const form = document.getElementById("analysisForm");
+const analyzeButton = document.getElementById("analyzeButton");
+const results = document.getElementById("results");
+const formError = document.getElementById("formError");
+const fastMode = document.getElementById("fastMode");
+
+function bar(label, value) {
+  const v = Math.max(0, Math.min(100, Math.round(value || 0)));
+  return `
+    <div class="row">
+      <div class="bar-value"><strong>${esc(label)}:</strong> ${v}%</div>
+      <div class="bar-container"><div class="bar" style="width:${v}%"></div></div>
+    </div>`;
+}
+
+function renderResult(payload) {
+  const { finalScore, detailedScores, geminiAnalysis, topCompetitor, mapEmbedUrl } = payload;
+
+  let html = `
+    <div class="score">Overall Score: ${finalScore}%</div>
+    ${bar("Overall Rating", detailedScores["Overall Rating"])}
+    ${bar("Review Volume", detailedScores["Review Volume"])}
+    ${bar("Pain Point Resonance", detailedScores["Pain Point Resonance"])}
+    ${bar("Call-to-Action Strength", detailedScores["Call-to-Action Strength"])}
+    ${bar("Website Health", detailedScores["Website Health"])}
+    ${bar("On-Page SEO", detailedScores["On-Page SEO"])}
+  `;
+
+  html += `
+    <details open>
+      <summary><strong>Recommended Next Step</strong></summary>
+      <div class="logic-explainer">${esc(geminiAnalysis?.topPriority || "No suggestion")}</div>
+    </details>
+    <details>
+      <summary><strong>Competitor Ad Themes</strong></summary>
+      <div class="logic-explainer">${esc(geminiAnalysis?.competitorAdAnalysis || "—")}</div>
+    </details>
+    <details>
+      <summary><strong>Review Sentiment</strong></summary>
+      <div class="logic-explainer">${esc(geminiAnalysis?.reviewSentiment || "—")}</div>
+    </details>
+  `;
+
+  if (topCompetitor?.name) {
+    html += `
       <div class="row">
-        <label for="businessName">Business Name *</label>
-        <input id="businessName" type="text" placeholder="Reuther Materials" required autocomplete="organization" />
-      </div>
+        <strong>Top Competitor:</strong> ${esc(topCompetitor.name)}
+        ${topCompetitor.website ? `&nbsp;— <a href="${esc(topCompetitor.website)}" target="_blank" rel="noopener">website</a>` : ""}
+      </div>`;
+  }
 
-      <div class="row">
-        <label for="websiteUrl">Website URL *</label>
-        <input id="websiteUrl" type="url" placeholder="reuthermaterial.com" required inputmode="url" autocomplete="url" />
-        <div class="hint">You can paste just the domain — no need for https://</div>
-      </div>
+  if (mapEmbedUrl) {
+    html += `
+      <div class="map-container">
+        <iframe src="${esc(mapEmbedUrl)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe>
+      </div>`;
+  }
 
-      <div class="row">
-        <label>Business Type *</label>
-        <div class="radio-row">
-          <label><input type="radio" name="businessType" value="specialty" required /> Specialty</label>
-          <label><input type="radio" name="businessType" value="maintenance" /> Maintenance</label>
-        </div>
-      </div>
+  results.innerHTML = html;
+}
 
-      <div class="row">
-        <label for="serviceArea">Primary Service Area (City/County/Region)</label>
-        <input id="serviceArea" type="text" placeholder="North Bergen, NJ" autocomplete="address-level2" />
-      </div>
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  formError.style.display = "none";
+  results.innerHTML = "";
 
-      <div class="row controls">
-        <button id="analyzeButton" type="submit">Analyze My Business</button>
-        <label style="display:flex; align-items:center; gap:8px;">
-          <input type="checkbox" id="fastMode" />
-          Fast test mode
-        </label>
-      </div>
+  const businessName = document.getElementById("businessName").value.trim();
+  const websiteUrl = normalizeWebsite(document.getElementById("websiteUrl").value);
+  const serviceArea = document.getElementById("serviceArea").value.trim();
+  const businessType = [...document.querySelectorAll('input[name="businessType"]')].find(i => i.checked)?.value;
 
-      <div id="formError" class="hint error" role="alert" style="display:none;"></div>
-    </form>
-  </div>
+  if (!businessName || !websiteUrl || !businessType) {
+    formError.textContent = "Please complete all required fields.";
+    formError.style.display = "block";
+    return;
+  }
 
-  <div id="results"></div>
+  analyzeButton.disabled = true;
+  analyzeButton.textContent = "Analyzing…";
 
-  <script src="/widget.js" defer></script>
-</body>
-</html>
+  try {
+    const qs = fastMode.checked ? "?quick=1" : "";
+    const res = await fetch(`${API_PATH}${qs}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ businessName, websiteUrl, businessType, serviceArea })
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data?.success) {
+      throw new Error(data?.message || data?.error || "Analysis failed.");
+    }
+
+    renderResult(data);
+  } catch (err) {
+    console.error(err);
+    formError.textContent = err.message || "Something went wrong.";
+    formError.style.display = "block";
+  } finally {
+    analyzeButton.disabled = false;
+    analyzeButton.textContent = "Analyze My Business";
+  }
+});
