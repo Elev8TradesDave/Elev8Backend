@@ -1,5 +1,5 @@
 // Works on Render and localhost
-const API_PATH = (window.__API_PATH || "/api/analyze");
+const API_PATH = "/api/analyze";
 
 function esc(s) { return String(s ?? "").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
@@ -20,6 +20,9 @@ const analyzeButton = document.getElementById("analyzeButton");
 const results = document.getElementById("results");
 const formError = document.getElementById("formError");
 const fastMode = document.getElementById("fastMode");
+
+// transient selection state for candidate chooser (no HTML change needed)
+window.__forcePlaceId = null;
 
 function bar(label, value) {
   const v = Math.max(0, Math.min(100, Math.round(value || 0)));
@@ -67,7 +70,11 @@ function wireClarificationButtons(clarifications) {
         document.getElementById("websiteUrl").value = s.value || "";
       } else if (s.field === "businessName") {
         document.getElementById("businessName").value = s.value || "";
+      } else if (s.field === "placeId") {
+        // lock a specific Google Place
+        window.__forcePlaceId = s.value || null;
       }
+
       form.requestSubmit();
     });
   });
@@ -75,7 +82,7 @@ function wireClarificationButtons(clarifications) {
 
 // --- Main result UI ---
 function renderResult(payload) {
-  const { finalScore, detailedScores, geminiAnalysis, topCompetitor, mapEmbedUrl, clarifications } = payload;
+  const { finalScore, detailedScores, geminiAnalysis, topCompetitor, mapEmbedUrl, clarifications, hints } = payload;
 
   let html = `
     <div class="score">Overall Score: ${finalScore}%</div>
@@ -95,6 +102,9 @@ function renderResult(payload) {
     <details>
       <summary><strong>Competitor Ad Themes</strong></summary>
       <div class="logic-explainer">${esc(geminiAnalysis?.competitorAdAnalysis || "—")}</div>
+      ${hints && hints.adsEnabled === false
+        ? `<div class="hint">Ads scraping is disabled in production. Enable it in env to see live ad themes.</div>`
+        : ""}
     </details>
     <details>
       <summary><strong>Review Sentiment</strong></summary>
@@ -141,12 +151,18 @@ form.addEventListener("submit", async (e) => {
   analyzeButton.disabled = true;
   analyzeButton.textContent = "Analyzing…";
 
+  const selectedPlaceId = window.__forcePlaceId || null; // carry any selection
+  window.__forcePlaceId = null; // reset after reading
+
   try {
     const qs = fastMode.checked ? "?quick=1" : "";
+    const body = { businessName, websiteUrl, businessType, serviceArea };
+    if (selectedPlaceId) body.placeId = selectedPlaceId;
+
     const res = await fetch(`${API_PATH}${qs}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ businessName, websiteUrl, businessType, serviceArea })
+      body: JSON.stringify(body)
     });
 
     const data = await res.json().catch(() => ({}));
@@ -156,6 +172,8 @@ form.addEventListener("submit", async (e) => {
       if (clar.length) {
         results.innerHTML = renderClarifications(clar);
         wireClarificationButtons(clar);
+        // Don’t surface the throw to the user if we showed actionable choices
+        if (!data?.message && !data?.error) return;
         throw new Error(data?.message || data?.error || "Try one of the suggestions above.");
       }
       throw new Error(data?.message || data?.error || "Analysis failed.");

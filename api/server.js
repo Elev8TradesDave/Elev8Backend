@@ -105,6 +105,7 @@ const healthHandler = (_req, res) =>
     mapsKeyPresent: Boolean(MAPS_SERVER),
     embedKeyPresent: Boolean(MAPS_EMBED),
     geminiKeyPresent: Boolean(process.env.GEMINI_API_KEY),
+    adsEnabled: ENABLE_AD_SCRAPE && (!IS_PRODUCTION || /^true$/i.test(process.env.ENABLE_AD_SCRAPE_IN_PROD || "false")),
     env: process.env.NODE_ENV || "unknown"
   });
 
@@ -184,7 +185,7 @@ function normalizeServiceArea(sa = "") {
   return s.replace(/\b[a-z]/g, (m) => m.toUpperCase());
 }
 
-// ---------- STATE CODE HELPERS (case-insensitive; full names + 2-letter) ----------
+// ---------- STATE CODE HELPERS ----------
 const STATE_NAME_TO_CODE = {
   "alabama":"AL","alaska":"AK","arizona":"AZ","arkansas":"AR","california":"CA","colorado":"CO",
   "connecticut":"CT","delaware":"DE","district of columbia":"DC","dc":"DC","florida":"FL","georgia":"GA",
@@ -200,13 +201,11 @@ const STATE_NAME_TO_CODE = {
 function serviceAreaStateCode(sa = "") {
   const s = String(sa).trim().toLowerCase();
 
-  // two-letter code anywhere
   const m = s.match(
     /\b(al|ak|az|ar|ca|co|ct|de|dc|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy)\b/i
   );
   if (m) return m[1].toUpperCase();
 
-  // full name
   for (const name in STATE_NAME_TO_CODE) {
     if (s.includes(name)) return STATE_NAME_TO_CODE[name];
   }
@@ -231,7 +230,7 @@ function radiusByLevel(level) {
     case "state":     return 200_000;
     case "region":    return 120_000;
     case "county":    return  60_000;
-    case "locality":  return  50_000; // increased from 35k
+    case "locality":  return  50_000;
     default:          return  80_000;
   }
 }
@@ -512,11 +511,22 @@ app.get("/reverse", reverseHandler);
 // ---------- ANALYZE ----------
 const analyzeHandler = async (req, res) => {
   const start = Date.now();
-  const { businessName, websiteUrl, businessType, serviceArea, selectedPlaceId } = req.body || {};
+
+  // accept either placeId (from UI) or selectedPlaceId (older name)
+  const {
+    businessName,
+    websiteUrl,
+    businessType,
+    serviceArea,
+    placeId,
+    selectedPlaceId
+  } = req.body || {};
+  const chosenPlaceId = selectedPlaceId || placeId || null;
+
   const quickMode = req.query.quick === "1";
 
   console.log('[ANALYZE] start', {
-    quickMode, path: req.path, businessName, serviceArea, businessType, selectedPlaceId
+    quickMode, path: req.path, businessName, serviceArea, businessType, chosenPlaceId
   });
 
   // Quick mode
@@ -542,7 +552,8 @@ const analyzeHandler = async (req, res) => {
       },
       topCompetitor: null,
       mapEmbedUrl: buildMapEmbedUrl(q),
-      clarifications: [] // none in quick mode
+      clarifications: [],
+      hints: { adsEnabled: ENABLE_AD_SCRAPE && (!IS_PRODUCTION || /^true$/i.test(process.env.ENABLE_AD_SCRAPE_IN_PROD || "false")) }
     });
   }
 
@@ -578,12 +589,12 @@ const analyzeHandler = async (req, res) => {
 
   const effectiveServiceArea = (serviceArea || "").toString().trim();
 
-  // Fast path: the UI already gave us the chosen place
-  if (selectedPlaceId) {
-    const det = await fetchPlaceDetails(selectedPlaceId);
+  // Fast path: UI already chose a specific Place
+  if (chosenPlaceId) {
+    const det = await fetchPlaceDetails(chosenPlaceId);
     if (det) {
       const picked = {
-        place_id: selectedPlaceId,
+        place_id: chosenPlaceId,
         name: det.name,
         website: det.website,
         rating: det.rating,
@@ -599,15 +610,15 @@ const analyzeHandler = async (req, res) => {
       const embedTarget = `place_id:${picked.place_id}`;
       const mapEmbedUrl = buildMapEmbedUrl(embedTarget);
 
-      // Gemini (optional)
+      // Gemini (optional, robust)
       let geminiAnalysis = { scores: {}, topPriority: "", competitorAdAnalysis: "", reviewSentiment: "" };
       if (model) {
         const prompt = `
 Analyze a local contractor:
 - Business: "${businessName}"
-- Market: "${effectiveServiceArea || "unknown"}"
+- Market: "${(serviceArea || "").toString().trim() || "unknown"}"
 - Model: "${businessType}"
-- Website: "${normalizedWebsite}"
+- Website: "${isHttpUrl(websiteUrl) ? websiteUrl : `https://${(websiteUrl||"").replace(/^\/*/,"")}`}"
 
 Return ONLY JSON:
 {
@@ -623,14 +634,19 @@ Return ONLY JSON:
               contents: [{ role: "user", parts: [{ text: prompt }] }],
               generationConfig: { maxOutputTokens: 1024 }
             }),
-            7000,
+            12000,
             "Gemini timeout"
           );
           const raw = gen?.response?.text() || "";
-          const match = raw.match(/{[\s\S]*}/);
-          if (match) geminiAnalysis = JSON.parse(match[0]);
+          const match = raw.match(/\{[\s\S]*\}$/);
+          if (match) {
+            geminiAnalysis = JSON.parse(match[0]);
+          } else {
+            geminiAnalysis.topPriority ||= "Add your primary service city + trade to your H1 and title tag.";
+          }
         } catch (e) {
           console.warn("Gemini step skipped:", e.message);
+          geminiAnalysis.topPriority ||= "Add your primary service city + trade to your H1 and title tag.";
         }
       }
 
@@ -640,7 +656,9 @@ Return ONLY JSON:
         businessType
       );
 
-      console.log(`[ANALYZE] done (selected) in ${Date.now() - start}ms`, {
+      const adsEnabled = ENABLE_AD_SCRAPE && (!IS_PRODUCTION || /^true$/i.test(process.env.ENABLE_AD_SCRAPE_IN_PROD || "false"));
+
+      console.log(`[ANALYZE] done (chosen place) in ${Date.now() - start}ms`, {
         placeId: picked.place_id, rating: googleData.rating, reviews: googleData.reviewCount, finalScore
       });
 
@@ -651,10 +669,11 @@ Return ONLY JSON:
         geminiAnalysis,
         topCompetitor: null,
         mapEmbedUrl,
-        clarifications: []
+        clarifications: [],
+        hints: { adsEnabled }
       });
     }
-    // if details fetch failed, continue into normal resolution flow below
+    // if details fetch failed, proceed
   }
 
   try {
@@ -700,22 +719,20 @@ Return ONLY JSON:
       };
     }));
 
-    // If multiple & no exact domain match -> ask the user to choose
+    // If multiple & no exact domain match -> ask the user to choose (clarifications)
     const byExactDomain = (c) => c.website && normalizeHost(c.website) === normalizeHost(normalizedWebsite);
     const exactDomain = enriched.find(byExactDomain);
 
     if (!exactDomain && enriched.length > 1) {
-      const candidatesPayload = enriched.map(c => ({
-        placeId: c.place_id,
-        name: c.name,
-        address: c.formatted_address,
-        rating: c.rating ?? 0,
-        reviews: c.user_ratings_total ?? 0
+      const clarifications = enriched.map(c => ({
+        message: `${c.name} — ${c.formatted_address || "address unavailable"}${c.website ? ` — ${normalizeHost(c.website)}` : ""}`,
+        suggestion: { field: "placeId", value: c.place_id, label: "Use this business" }
       }));
-      return res.status(200).json({
+
+      return res.status(409).json({
         success: false,
         message: "Multiple possible matches found. Please select the correct business.",
-        candidates: candidatesPayload
+        clarifications
       });
     }
 
@@ -772,14 +789,19 @@ Return ONLY JSON:
             contents: [{ role: "user", parts: [{ text: prompt }] }],
             generationConfig: { maxOutputTokens: 1024 }
           }),
-          7000,
+          12000,
           "Gemini timeout"
         );
         const raw = gen?.response?.text() || "";
-        const match = raw.match(/{[\s\S]*}/);
-        if (match) geminiAnalysis = JSON.parse(match[0]);
+        const match = raw.match(/\{[\s\S]*\}$/);
+        if (match) {
+          geminiAnalysis = JSON.parse(match[0]);
+        } else {
+          geminiAnalysis.topPriority ||= "Add your primary service city + trade to your H1 and title tag.";
+        }
       } catch (e) {
         console.warn("Gemini step skipped:", e.message);
+        geminiAnalysis.topPriority ||= "Add your primary service city + trade to your H1 and title tag.";
       }
     }
 
@@ -802,6 +824,8 @@ Return ONLY JSON:
       });
     }
 
+    const adsEnabled = ENABLE_AD_SCRAPE && (!IS_PRODUCTION || /^true$/i.test(process.env.ENABLE_AD_SCRAPE_IN_PROD || "false"));
+
     return res.status(200).json({
       success: true,
       finalScore,
@@ -809,7 +833,8 @@ Return ONLY JSON:
       geminiAnalysis,
       topCompetitor: topCompetitorData,
       mapEmbedUrl,
-      clarifications
+      clarifications,
+      hints: { adsEnabled }
     });
   } catch (error) {
     console.error("[ANALYZE] FAIL", errPayload(error));
