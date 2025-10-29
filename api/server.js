@@ -125,15 +125,15 @@ function requireEnv(keys, res) {
 // ---------- CLIENTS ----------
 const mapsClient = new Client({});
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-// FIX: Use v1 model name that exists
+// Use a widely-available model to avoid v1beta 404s
 const model = process.env.GEMINI_API_KEY
-  ? genAI.getGenerativeModel({ model: "gemini-1.5-pro-latest" })
+  ? genAI.getGenerativeModel({ model: "gemini-1.5-flash" })
   : null;
 
 // ---------- UTILS ----------
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
 const normalizeHost = (h) => (h || "").toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*/, "");
-const looksLikeDomain = (s="") => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(s);
+const looksLikeDomain = (s = "") => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(s);
 
 const isHttpUrl = (u) => {
   try {
@@ -165,6 +165,22 @@ const errPayload = (e) => {
       : undefined;
   return { msg: e?.message, status, data: dataStr };
 };
+
+// --- Name & Service Area normalization ---
+const COMPANY_SUFFIXES = /\b(inc\.?|llc|l\.l\.c\.|corp\.?|co\.?|ltd\.?|limited|company)\b/gi;
+function cleanBusinessName(name = "") {
+  return String(name)
+    .toLowerCase()
+    .replace(COMPANY_SUFFIXES, "")
+    .replace(/[^a-z0-9&\-'\s]/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function normalizeServiceArea(sa = "") {
+  const s = String(sa).trim().replace(/\s*,\s*/g, ", ");
+  return s.replace(/\b[a-z]/g, (m) => m.toUpperCase());
+}
 
 // ---------- AREA CLASSIFICATION + RADIUS ----------
 const US_STATES = new Set([
@@ -198,11 +214,12 @@ function radiusByLevel(level) {
 }
 
 async function geocodeServiceAreaForBias(serviceArea) {
-  if (!serviceArea) return null;
-  const inferred = inferRegionLevelFromText(serviceArea);
+  const normalized = normalizeServiceArea(serviceArea || "");
+  if (!normalized) return null;
+  const inferred = inferRegionLevelFromText(normalized);
   try {
     const { data } = await mapsClient.geocode({
-      params: { address: serviceArea, region: "us", key: MAPS_SERVER },
+      params: { address: normalized, region: "us", key: MAPS_SERVER },
       timeout: 6000
     });
     const first = data?.results?.[0];
@@ -229,48 +246,66 @@ async function tryFindPlace(params) {
   return data?.candidates || [];
 }
 
-// Prefer FindPlace (no unsupported fields) with radius bias; retry un-biased; fallback TextSearch
-async function resolvePlaceCandidates({ businessName, serviceArea }) {
-  const input = [businessName, serviceArea].filter(Boolean).join(" ").trim();
-  const biasInfo = await geocodeServiceAreaForBias(serviceArea);
+// Robust resolver: tries domain, name+area variants, with FindPlace/TextSearch
+async function resolvePlaceCandidates({ businessName, serviceArea, websiteUrl }) {
+  const cleanedName = cleanBusinessName(businessName || "");
+  const normalizedSA = normalizeServiceArea(serviceArea || "");
+  const biasInfo = await geocodeServiceAreaForBias(normalizedSA);
 
-  try {
-    const baseParams = {
-      input,
+  // Domain host from website
+  let host = "";
+  try { host = new URL(websiteUrl || "").hostname; } catch {
+    host = normalizeHost(websiteUrl || "");
+  }
+
+  const tryFind = async (q, withBias = true) => {
+    const base = {
+      input: q,
       inputtype: "textquery",
-      fields: ["place_id", "name", "formatted_address"], // IMPORTANT: FindPlace does NOT support 'website'
+      fields: ["place_id", "name", "formatted_address"], // allowed in FindPlace
       region: "us",
       key: MAPS_SERVER
     };
+    const params = (withBias && biasInfo?.lat && biasInfo?.lng)
+      ? { ...base, locationbias: `circle:${Math.max(20000, radiusByLevel(biasInfo.level || "unknown"))}@${biasInfo.lat},${biasInfo.lng}` }
+      : base;
+    const out = await tryFindPlace(params);
+    return out;
+  };
 
-    if (biasInfo?.lat && biasInfo?.lng) {
-      const radius = radiusByLevel(biasInfo.level || "unknown");
-      const biased = await tryFindPlace({
-        ...baseParams,
-        locationbias: `circle:${Math.max(20_000, radius)}@${biasInfo.lat},${biasInfo.lng}`
-      });
-      if (biased.length) return biased;
-
-      const unBiased = await tryFindPlace(baseParams);
-      if (unBiased.length) return unBiased;
-    } else {
-      const unBiased = await tryFindPlace(baseParams);
-      if (unBiased.length) return unBiased;
+  const tryText = async (q, withBias = true) => {
+    const params = { query: q, region: "us", key: MAPS_SERVER };
+    if (withBias && biasInfo?.lat && biasInfo?.lng) {
+      params.location = { lat: biasInfo.lat, lng: biasInfo.lng };
+      params.radius = Math.max(20000, radiusByLevel(biasInfo.level || "unknown"));
     }
-  } catch (e) {
-    console.log("FindPlace miss:", errPayload(e));
-  }
-
-  try {
-    const { data } = await mapsClient.textSearch({
-      params: { query: input, region: "us", key: MAPS_SERVER },
-      timeout: 7000
-    });
+    const { data } = await mapsClient.textSearch({ params, timeout: 7000 });
     return data?.results || [];
-  } catch (e) {
-    console.log("TextSearch miss:", errPayload(e));
-    return [];
+  };
+
+  const variants = [
+    host && { type: "find", q: host, bias: true },
+    host && { type: "find", q: host, bias: false },
+
+    cleanedName && normalizedSA && { type: "find", q: `${cleanedName} ${normalizedSA}`, bias: true },
+    cleanedName && normalizedSA && { type: "find", q: `${cleanedName} ${normalizedSA}`, bias: false },
+
+    cleanedName && { type: "find", q: cleanedName, bias: false },
+
+    host && { type: "text", q: host, bias: true },
+    cleanedName && normalizedSA && { type: "text", q: `${cleanedName} ${normalizedSA}`, bias: true },
+    cleanedName && { type: "text", q: cleanedName, bias: false }
+  ].filter(Boolean);
+
+  for (const v of variants) {
+    try {
+      const out = v.type === "find" ? await tryFind(v.q, v.bias) : await tryText(v.q, v.bias);
+      if (out?.length) return out;
+    } catch (e) {
+      console.log("Search variant miss:", v, errPayload(e));
+    }
   }
+  return [];
 }
 
 async function fetchPlaceDetails(placeId) {
@@ -278,7 +313,7 @@ async function fetchPlaceDetails(placeId) {
     const { data } = await mapsClient.placeDetails({
       params: {
         place_id: placeId,
-        fields: ["name", "website", "rating", "user_ratings_total", "formatted_address"], // website allowed here
+        fields: ["name", "website", "rating", "user_ratings_total", "formatted_address"],
         key: MAPS_SERVER
       },
       timeout: 6000
@@ -303,7 +338,6 @@ function pickBestCandidateByWebsite(candidates, websiteUrl) {
   targetHost = normalizeHost(targetHost);
   if (!targetHost) return candidates[0];
 
-  // If we already fetched details, candidate may not have website here; selection is revalidated later
   const exact = candidates.find((c) => c.website && normalizeHost(c.website) === targetHost);
   if (exact) return exact;
 
@@ -461,7 +495,11 @@ const analyzeHandler = async (req, res) => {
   const effectiveServiceArea = (serviceArea || "").toString().trim();
 
   try {
-    const candidates = await resolvePlaceCandidates({ businessName, serviceArea: effectiveServiceArea });
+    const candidates = await resolvePlaceCandidates({
+      businessName,
+      serviceArea: effectiveServiceArea,
+      websiteUrl: normalizedWebsite
+    });
     console.log('[ANALYZE] candidates', { count: candidates?.length || 0, serviceArea: effectiveServiceArea });
 
     if (!candidates.length) {
@@ -487,7 +525,7 @@ const analyzeHandler = async (req, res) => {
     // Pull details for each candidate to get website fields before choosing
     const enriched = await Promise.all(candidates.slice(0, 5).map(async c => {
       const det = c.place_id ? await fetchPlaceDetails(c.place_id) : null;
-      return { ...c, website: det?.website, rating: det?.rating, user_ratings_total: det?.user_ratings_total };
+      return { ...c, website: det?.website, rating: det?.rating, user_ratings_total: det?.user_ratings_total, formatted_address: det?.formatted_address || c.formatted_address };
     }));
 
     const picked = pickBestCandidateByWebsite(enriched, normalizedWebsite) || enriched[0];
