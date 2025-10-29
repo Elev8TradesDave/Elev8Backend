@@ -169,44 +169,111 @@ const errPayload = (e) => {
 const normalizeHost = (h) =>
   (h || "").toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*/, "");
 
+/** NEW: infer what kind of area the user typed (state / region / county / city) */
+function inferRegionLevelFromText(saRaw = "") {
+  const s = saRaw.toLowerCase().trim();
+  if (!s) return { level: "unknown", hint: null };
+
+  // common state patterns
+  if (/\b(new jersey|nj|new york|ny|pennsylvania|pa|connecticut|ct|united states|usa)\b/.test(s)) {
+    if (/\b(new jersey|nj)\b/.test(s)) return { level: "state", hint: "NJ" };
+    return { level: "state", hint: null };
+  }
+
+  // coarse regions
+  if (/\b(north|central|south|shore|tri[-\s]?state|hudson valley|delaware valley|nyc metro|new york metro)\b/.test(s)) {
+    return { level: "region", hint: null };
+  }
+
+  if (/\bcounty\b/.test(s)) return { level: "county", hint: null };
+  if (/,?\s*(nj|ny|pa|ct)\b/.test(s)) return { level: "locality", hint: null };
+
+  return { level: "unknown", hint: null };
+}
+
+/** NEW: radius (meters) to use for Places locationbias by level */
+function radiusByLevel(level) {
+  switch (level) {
+    case "state":     return 200_000; // 200 km
+    case "region":    return 120_000; // 120 km
+    case "county":    return  60_000; //  60 km
+    case "locality":  return  25_000; //  25 km
+    default:          return  80_000; // fallback
+  }
+}
+
+/** UPDATED: return lat/lng + inferred level from either Google result or text */
 async function geocodeServiceAreaForBias(serviceArea) {
   if (!serviceArea) return null;
+  const inferred = inferRegionLevelFromText(serviceArea);
+
   try {
     const { data } = await mapsClient.geocode({
       params: { address: serviceArea, region: "us", key: MAPS_SERVER },
       timeout: 5000
     });
-    const loc = data?.results?.[0]?.geometry?.location;
-    return loc ? { lat: loc.lat, lng: loc.lng } : null;
+
+    const first = data?.results?.[0];
+    if (!first) return null;
+
+    const loc = first.geometry?.location;
+    if (!loc) return null;
+
+    // Determine level from address components if possible
+    const acTypes = new Set((first.address_components || []).flatMap(c => c.types));
+    let level = inferred.level;
+    if (acTypes.has("administrative_area_level_1")) level = "state";
+    else if (acTypes.has("administrative_area_level_2")) level = "county";
+    else if (acTypes.has("locality") || acTypes.has("postal_town")) level = "locality";
+
+    return { lat: loc.lat, lng: loc.lng, level };
   } catch (e) {
     console.log("Geocode bias failed:", errPayload(e));
     return null;
   }
 }
 
-// Prefer FindPlaceFromText with a tight bias; falls back to TextSearch.
+/** UPDATED: Prefer FindPlace with scaled radius; retry without bias; fallback TextSearch */
 async function resolvePlaceCandidates({ businessName, serviceArea }) {
   const input = [businessName, serviceArea].filter(Boolean).join(" ").trim();
-  const bias = await geocodeServiceAreaForBias(serviceArea);
+  const biasInfo = await geocodeServiceAreaForBias(serviceArea);
 
-  // Try FindPlaceFromText first (precise + fast)
+  const tryFindPlace = async (params) => {
+    const { data } = await mapsClient.findPlaceFromText({ params, timeout: 5000 });
+    return data?.candidates || [];
+  };
+
   try {
-    const params = {
+    const baseParams = {
       input,
       inputtype: "textquery",
-      fields: ["place_id", "name", "formatted_address"],
+      fields: ["place_id", "name", "formatted_address", "website"],
       region: "us",
       key: MAPS_SERVER
     };
-    if (bias) params.locationbias = `circle:5000@${bias.lat},${bias.lng}`;
 
-    const { data } = await mapsClient.findPlaceFromText({ params, timeout: 5000 });
-    if (data?.candidates?.length) return data.candidates;
+    // 1) Biased search with radius scaled to area type
+    if (biasInfo?.lat && biasInfo?.lng) {
+      const radius = radiusByLevel(biasInfo.level || "unknown");
+      const biased = await tryFindPlace({
+        ...baseParams,
+        locationbias: `circle:${radius}@${biasInfo.lat},${biasInfo.lng}`
+      });
+      if (biased.length) return biased;
+
+      // 2) Retry same query with NO bias
+      const unBiased = await tryFindPlace(baseParams);
+      if (unBiased.length) return unBiased;
+    } else {
+      // No geocode → go directly un-biased
+      const unBiased = await tryFindPlace(baseParams);
+      if (unBiased.length) return unBiased;
+    }
   } catch (e) {
     console.log("FindPlace miss:", errPayload(e));
   }
 
-  // Fallback: TextSearch (broader)
+  // 3) Fallback: TextSearch
   try {
     const { data } = await mapsClient.textSearch({
       params: { query: input, region: "us", key: MAPS_SERVER },
@@ -404,8 +471,10 @@ const analyzeHandler = async (req, res) => {
     // Resolve candidates, pick best by website host (if available)
     const candidates = await resolvePlaceCandidates({ businessName, serviceArea: effectiveServiceArea });
 
+    console.log('[ANALYZE] candidates', { count: candidates?.length || 0, serviceArea: effectiveServiceArea });
+
     if (!candidates.length) {
-      console.log('[ANALYZE] No candidates found for', businessName, serviceArea);
+      console.log('[ANALYZE] No candidates found for', businessName, effectiveServiceArea);
       return res.status(404).json({ success:false, error:"No Google Business Profile found for this query." });
     }
 
