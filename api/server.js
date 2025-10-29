@@ -1,5 +1,5 @@
 /**
- * Elev8Trades Backend (Render/Vercel-friendly, IPv6-safe)
+ * Elev8Trades Backend (Render-friendly, IPv6-safe)
  * File: api/server.js
  */
 
@@ -13,7 +13,6 @@ const { Client } = require("@googlemaps/google-maps-services-js");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const puppeteer = require("puppeteer-core");
 const chromium = require("@sparticuz/chromium");
-const serverless = require("serverless-http");
 const path = require("path");
 
 // ---------- CONFIG ----------
@@ -88,12 +87,10 @@ app.use(
 app.use("/favicon.ico", (_req, res) => res.status(204).end());
 app.use("/favicon.png", (_req, res) => res.status(204).end());
 
-// ---------- SERVE WIDGET AT ROOT ----------
+// ---------- SERVE WIDGET ----------
 app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "..", "widget.html"));
 });
-
-// ---------- SERVE ASSETS EXPLICITLY (prevents 404 HTML for /widget.js) ----------
 app.get("/widget.html", (_req, res) => {
   res.type("text/html").sendFile(path.join(__dirname, "..", "widget.html"));
 });
@@ -165,44 +162,42 @@ const errPayload = (e) => {
   return { msg: e?.message, status, data: dataStr, stack: e?.stack };
 };
 
-// ---------- PLACE MATCH HELPERS ----------
 const normalizeHost = (h) =>
   (h || "").toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*/, "");
 
-/** NEW: infer what kind of area the user typed (state / region / county / city) */
+// ---------- AREA CLASSIFICATION + RADIUS ----------
+const US_STATES = new Set([
+  "alabama","alaska","arizona","arkansas","california","colorado","connecticut","delaware",
+  "district of columbia","dc","florida","georgia","hawaii","idaho","illinois","indiana","iowa",
+  "kansas","kentucky","louisiana","maine","maryland","massachusetts","michigan","minnesota",
+  "mississippi","missouri","montana","nebraska","nevada","new hampshire","new jersey",
+  "new mexico","new york","north carolina","north dakota","ohio","oklahoma","oregon",
+  "pennsylvania","rhode island","south carolina","south dakota","tennessee","texas","utah",
+  "vermont","virginia","washington","west virginia","wisconsin","wyoming"
+]);
+
 function inferRegionLevelFromText(saRaw = "") {
   const s = saRaw.toLowerCase().trim();
   if (!s) return { level: "unknown", hint: null };
 
-  // common state patterns
-  if (/\b(new jersey|nj|new york|ny|pennsylvania|pa|connecticut|ct|united states|usa)\b/.test(s)) {
-    if (/\b(new jersey|nj)\b/.test(s)) return { level: "state", hint: "NJ" };
-    return { level: "state", hint: null };
-  }
-
-  // coarse regions
-  if (/\b(north|central|south|shore|tri[-\s]?state|hudson valley|delaware valley|nyc metro|new york metro)\b/.test(s)) {
-    return { level: "region", hint: null };
-  }
-
+  if (US_STATES.has(s)) return { level: "state", hint: null };
+  if (/\b(north|central|south|east|west|upper|lower)\s+(nj|jersey|new jersey)\b/.test(s)) return { level: "region", hint: "nj" };
   if (/\bcounty\b/.test(s)) return { level: "county", hint: null };
-  if (/,?\s*(nj|ny|pa|ct)\b/.test(s)) return { level: "locality", hint: null };
+  if (/(,\s*)?(nj|new jersey|ny|new york|pa|pennsylvania|ct|connecticut)\b/.test(s)) return { level: "locality", hint: null };
 
   return { level: "unknown", hint: null };
 }
 
-/** NEW: radius (meters) to use for Places locationbias by level */
 function radiusByLevel(level) {
   switch (level) {
-    case "state":     return 200_000; // 200 km
-    case "region":    return 120_000; // 120 km
-    case "county":    return  60_000; //  60 km
-    case "locality":  return  25_000; //  25 km
+    case "state":     return 200_000; // ~200 km
+    case "region":    return 120_000; // ~120 km
+    case "county":    return  60_000; // ~60 km
+    case "locality":  return  35_000; // ~35 km
     default:          return  80_000; // fallback
   }
 }
 
-/** UPDATED: return lat/lng + inferred level from either Google result or text */
 async function geocodeServiceAreaForBias(serviceArea) {
   if (!serviceArea) return null;
   const inferred = inferRegionLevelFromText(serviceArea);
@@ -219,7 +214,6 @@ async function geocodeServiceAreaForBias(serviceArea) {
     const loc = first.geometry?.location;
     if (!loc) return null;
 
-    // Determine level from address components if possible
     const acTypes = new Set((first.address_components || []).flatMap(c => c.types));
     let level = inferred.level;
     if (acTypes.has("administrative_area_level_1")) level = "state";
@@ -233,13 +227,13 @@ async function geocodeServiceAreaForBias(serviceArea) {
   }
 }
 
-/** UPDATED: Prefer FindPlace with scaled radius; retry without bias; fallback TextSearch */
+// Prefer FindPlace with scaled radius; retry un-biased; fallback TextSearch
 async function resolvePlaceCandidates({ businessName, serviceArea }) {
   const input = [businessName, serviceArea].filter(Boolean).join(" ").trim();
   const biasInfo = await geocodeServiceAreaForBias(serviceArea);
 
   const tryFindPlace = async (params) => {
-    const { data } = await mapsClient.findPlaceFromText({ params, timeout: 5000 });
+    const { data } = await mapsClient.findPlaceFromText({ params, timeout: 6000 });
     return data?.candidates || [];
   };
 
@@ -252,20 +246,17 @@ async function resolvePlaceCandidates({ businessName, serviceArea }) {
       key: MAPS_SERVER
     };
 
-    // 1) Biased search with radius scaled to area type
     if (biasInfo?.lat && biasInfo?.lng) {
       const radius = radiusByLevel(biasInfo.level || "unknown");
       const biased = await tryFindPlace({
         ...baseParams,
-        locationbias: `circle:${radius}@${biasInfo.lat},${biasInfo.lng}`
+        locationbias: `circle:${Math.max(20_000, radius)}@${biasInfo.lat},${biasInfo.lng}`
       });
       if (biased.length) return biased;
 
-      // 2) Retry same query with NO bias
       const unBiased = await tryFindPlace(baseParams);
       if (unBiased.length) return unBiased;
     } else {
-      // No geocode → go directly un-biased
       const unBiased = await tryFindPlace(baseParams);
       if (unBiased.length) return unBiased;
     }
@@ -273,11 +264,10 @@ async function resolvePlaceCandidates({ businessName, serviceArea }) {
     console.log("FindPlace miss:", errPayload(e));
   }
 
-  // 3) Fallback: TextSearch
   try {
     const { data } = await mapsClient.textSearch({
       params: { query: input, region: "us", key: MAPS_SERVER },
-      timeout: 5000
+      timeout: 7000
     });
     return data?.results || [];
   } catch (e) {
@@ -410,7 +400,7 @@ const analyzeHandler = async (req, res) => {
   const start = Date.now();
   const { businessName, websiteUrl, businessType, serviceArea } = req.body || {};
 
-  // Quick mode: now ONLY via query param ?quick=1 (no header triggers)
+  // Quick mode only via ?quick=1
   const quickMode = req.query.quick === "1";
 
   console.log('[ANALYZE] start', {
@@ -468,9 +458,7 @@ const analyzeHandler = async (req, res) => {
   const effectiveServiceArea = (serviceArea || "").toString().trim();
 
   try {
-    // Resolve candidates, pick best by website host (if available)
     const candidates = await resolvePlaceCandidates({ businessName, serviceArea: effectiveServiceArea });
-
     console.log('[ANALYZE] candidates', { count: candidates?.length || 0, serviceArea: effectiveServiceArea });
 
     if (!candidates.length) {
@@ -486,7 +474,7 @@ const analyzeHandler = async (req, res) => {
       reviewCount: userDetails?.user_ratings_total ?? 0
     };
 
-    // Competitor: take next candidate if available
+    // Competitor
     let topCompetitorData = null;
     let competitorAds = [];
     const competitorCandidate = candidates.find((c) => c.place_id && c.place_id !== picked.place_id);
@@ -507,7 +495,6 @@ const analyzeHandler = async (req, res) => {
       }
     }
 
-    // Map embed
     const embedTarget = picked?.place_id
       ? `place_id:${picked.place_id}`
       : (effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName);
@@ -581,7 +568,6 @@ app.post("/analyze", analyzeHandler);
 
 // ---------- SCORING ----------
 function calculateFinalScore(googleData, geminiScores, businessType) {
-  // Core signals
   const ratingScore = clampPct((Number(googleData.rating || 0) / 5) * 100);
 
   // Log curve for review volume: 1→0, 10→~25, 100→~50, 1k→~75, 10k→~100
@@ -598,12 +584,10 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
   const websiteHealth      = hasGemini ? clampPct(geminiScores.websiteHealth)      : null;
   const onPageSEO          = hasGemini ? clampPct(geminiScores.onPageSEO)          : null;
 
-  // Weights tuned so reviews matter more and rating has strong influence.
   const fullWeights = (businessType === "maintenance")
     ? { rating: 0.20, review: 0.25, pain: 0.10, cta: 0.15, web: 0.15, seo: 0.15 }
     : { rating: 0.25, review: 0.25, pain: 0.20, cta: 0.10, web: 0.10, seo: 0.10 };
 
-  // Use only available metrics; renormalize to 1
   const metrics = [
     { key: "rating", val: ratingScore,        w: fullWeights.rating },
     { key: "review", val: reviewScore,        w: fullWeights.review },
@@ -629,17 +613,16 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
   };
 }
 
-// ---------- EXPORT FOR VERCEL + LOCAL LISTEN ----------
-module.exports = serverless(app);
+// ---------- START SERVER (Render) ----------
+app
+  .listen(PORT, () => {
+    console.log(
+      `Server running on http://localhost:${PORT} (ads scrape: ${ENABLE_AD_SCRAPE ? (IS_PRODUCTION ? "prod-guarded" : "on") : "off"})`
+    );
+  })
+  .on("error", (err) => {
+    console.error("Server listen failed:", err);
+  });
 
-if (!process.env.VERCEL) {
-  app
-    .listen(PORT, () =>
-      console.log(
-        `Local server on http://localhost:${PORT} (ads scrape: ${ENABLE_AD_SCRAPE ? (IS_PRODUCTION ? "prod-guarded" : "on") : "off"})`
-      )
-    )
-    .on("error", (err) => {
-      console.error("Server listen failed:", err);
-    });
-}
+// Export app for tests (optional)
+module.exports = app;
