@@ -93,6 +93,14 @@ app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "..", "widget.html"));
 });
 
+// ---------- SERVE ASSETS EXPLICITLY (prevents 404 HTML for /widget.js) ----------
+app.get("/widget.html", (_req, res) => {
+  res.type("text/html").sendFile(path.join(__dirname, "..", "widget.html"));
+});
+app.get("/widget.js", (_req, res) => {
+  res.type("application/javascript").sendFile(path.join(__dirname, "..", "widget.js"));
+});
+
 // ---------- HEALTH ----------
 const healthHandler = (_req, res) =>
   res.json({

@@ -10,7 +10,7 @@
     .form { max-width: 720px; margin: 0 auto; }
     .row { margin: 12px 0; display: grid; gap: 6px; }
     .radio-row { display: flex; gap: 16px; }
-    .controls { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    .controls { display: flex; align-items: center; gap: 16px; }
     button { padding: 10px 14px; border: 0; border-radius: 10px; background:#111827; color:white; cursor:pointer; }
     input, select { padding: 8px 10px; border-radius: 8px; border: 1px solid #d1d5db; }
     .score { font-weight: 700; font-size: 20px; margin: 16px 0 8px; }
@@ -23,8 +23,6 @@
     .logic-explainer { white-space: pre-wrap; color:#444; }
     .hint { font-size: 12px; color:#666; margin-top:4px; }
     .error { color:#b91c1c; }
-    .card { border:1px solid #e5e7eb; border-radius:12px; padding:12px; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
   </style>
 </head>
 <body>
@@ -34,24 +32,22 @@
     <form id="analysisForm" novalidate>
       <div class="row">
         <label for="businessName">Business Name *</label>
-        <input id="businessName" type="text" placeholder="All State Home Improvement" required
-               autocomplete="organization" autofocus />
+        <input id="businessName" type="text" placeholder="Reuther Materials" required autocomplete="organization" />
       </div>
 
       <div class="row">
         <label for="websiteUrl">Website URL *</label>
-        <input id="websiteUrl" type="url" placeholder="example.com" required inputmode="url" autocomplete="url"
-               pattern="^((https?:\/\/)?([a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}(\/.*)?)$" />
+        <input id="websiteUrl" type="url" placeholder="reuthermaterial.com" required inputmode="url" autocomplete="url" />
         <div class="hint">You can paste just the domain — no need for https://</div>
       </div>
 
-      <fieldset class="row">
-        <legend>Business Type *</legend>
+      <div class="row">
+        <label>Business Type *</label>
         <div class="radio-row">
           <label><input type="radio" name="businessType" value="specialty" required /> Specialty</label>
           <label><input type="radio" name="businessType" value="maintenance" /> Maintenance</label>
         </div>
-      </fieldset>
+      </div>
 
       <div class="row">
         <label for="serviceArea">Primary Service Area (City/County/Region)</label>
@@ -66,21 +62,13 @@
         </label>
       </div>
 
-      <div id="formError" class="hint error" role="alert" style="display:none;" aria-live="polite"></div>
+      <div id="formError" class="hint error" role="alert" style="display:none;"></div>
     </form>
   </div>
 
-  <div id="results" aria-live="polite"></div>
+  <div id="results"></div>
 
-  <!-- Simple in-page debug (no inline JS) -->
-  <details class="card" id="debugPanel">
-    <summary><strong>Debug</strong></summary>
-    <div class="hint">Shows API base, request payload, and raw response. Add <code>?api=https://elev8backend.onrender.com</code> to force a base.</div>
-    <div><strong>API:</strong> <span id="dbgApi" class="mono"></span></div>
-    <div style="margin-top:8px;"><strong>Request:</strong><pre id="dbgReq" class="mono"></pre></div>
-    <div style="margin-top:8px;"><strong>Response:</strong><pre id="dbgRes" class="mono"></pre></div>
-  </details>
-
-  <script src="/widget.js" defer></script>
+  <!-- key fix: relative path so it always loads the file next to this HTML -->
+  <script src="./widget.js" defer></script>
 </body>
 </html>
