@@ -5,9 +5,7 @@
   "private": true,
   "main": "api/server.js",
   "license": "MIT",
-  "engines": {
-    "node": ">=18.17 <23"
-  },
+  "engines": { "node": "22.x" },
   "scripts": {
     "dev": "nodemon api/server.js",
     "start": "node api/server.js",
