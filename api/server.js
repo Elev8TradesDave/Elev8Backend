@@ -125,7 +125,7 @@ function requireEnv(keys, res) {
 // ---------- CLIENTS ----------
 const mapsClient = new Client({});
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-// Use a widely-available model to avoid v1beta 404s
+// Avoid v1beta 404s
 const model = process.env.GEMINI_API_KEY
   ? genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" })
   : null;
@@ -143,6 +143,8 @@ const isHttpUrl = (u) => {
     return false;
   }
 };
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const withTimeout = (p, ms, label = "timeout") =>
   Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(label)), ms))]);
@@ -261,9 +263,44 @@ async function geocodeServiceAreaForBias(serviceArea) {
   }
 }
 
+// ---------- Tiny retry helper for Maps calls ----------
+async function withOneRetry(fn, label = "maps") {
+  try {
+    return await fn();
+  } catch (e) {
+    const status = e?.response?.status;
+    const code = e?.response?.data?.status;
+    if (status === 429 || code === "OVER_QUERY_LIMIT") {
+      await sleep(350);
+      try { return await fn(); } catch (e2) { throw e2; }
+    }
+    throw e;
+  }
+}
+
+// ---------- PLACES CACHE (LRU-ish) ----------
+const PLACE_CACHE = new Map();
+const PLACE_TTL_MS = 60 * 60 * 1000; // 1h
+function getFromCache(id) {
+  const hit = PLACE_CACHE.get(id);
+  if (!hit) return null;
+  if (Date.now() > hit.exp) { PLACE_CACHE.delete(id); return null; }
+  PLACE_CACHE.delete(id);
+  PLACE_CACHE.set(id, hit);
+  return hit.val;
+}
+function setCache(id, val) {
+  PLACE_CACHE.set(id, { val, exp: Date.now() + PLACE_TTL_MS });
+  if (PLACE_CACHE.size > 500) {
+    const firstKey = PLACE_CACHE.keys().next().value;
+    PLACE_CACHE.delete(firstKey);
+  }
+}
+
 // ---------- PLACES HELPERS ----------
 async function tryFindPlace(params) {
-  const { data } = await mapsClient.findPlaceFromText({ params, timeout: 6000 });
+  const call = () => mapsClient.findPlaceFromText({ params, timeout: 6000 });
+  const { data } = await withOneRetry(call, "findPlaceFromText");
   return data?.candidates || [];
 }
 
@@ -293,9 +330,7 @@ async function resolvePlaceCandidates({ businessName, serviceArea, websiteUrl, b
       withBias && biasInfo?.lat && biasInfo?.lng
         ? {
             ...base,
-            locationbias: `circle:${Math.max(20000, radiusByLevel(biasInfo.level || "unknown"))}@${
-              biasInfo.lat
-            },${biasInfo.lng}`
+            locationbias: `circle:${Math.max(20000, radiusByLevel(biasInfo.level || "unknown"))}@${biasInfo.lat},${biasInfo.lng}`
           }
         : base;
     const out = await tryFindPlace(params);
@@ -308,13 +343,17 @@ async function resolvePlaceCandidates({ businessName, serviceArea, websiteUrl, b
       params.location = { lat: biasInfo.lat, lng: biasInfo.lng };
       params.radius = Math.max(20000, radiusByLevel(biasInfo.level || "unknown"));
     }
-    const { data } = await mapsClient.textSearch({ params, timeout: 7000 });
-    let results = data?.results || [];
+    const call = () => mapsClient.textSearch({ params, timeout: 7000 });
+    const { data } = await withOneRetry(call, "textSearch");
 
-    // State hint filter: keep results whose formatted_address ends with ", XX"
+    const rawResults = data?.results || [];
+    let results = rawResults;
+
+    // State hint filter: apply only if it doesn't nuke everything
     if (stateHint) {
       const re = new RegExp(`,\\s*${stateHint}\\b`, "i");
-      results = results.filter(r => re.test(r.formatted_address || ""));
+      const filtered = rawResults.filter(r => re.test(r.formatted_address || ""));
+      if (filtered.length) results = filtered;
     }
     return results;
   };
@@ -349,8 +388,10 @@ async function resolvePlaceCandidates({ businessName, serviceArea, websiteUrl, b
 }
 
 async function fetchPlaceDetails(placeId) {
+  const cached = getFromCache(placeId);
+  if (cached) return cached;
   try {
-    const { data } = await mapsClient.placeDetails({
+    const call = () => mapsClient.placeDetails({
       params: {
         place_id: placeId,
         fields: ["name", "website", "rating", "user_ratings_total", "formatted_address"],
@@ -358,7 +399,10 @@ async function fetchPlaceDetails(placeId) {
       },
       timeout: 6000
     });
-    return data?.result || null;
+    const { data } = await withOneRetry(call, "placeDetails");
+    const result = data?.result || null;
+    if (result) setCache(placeId, result);
+    return result;
   } catch (e) {
     console.log("PlaceDetails miss:", errPayload(e));
     return null;
@@ -468,11 +512,11 @@ app.get("/reverse", reverseHandler);
 // ---------- ANALYZE ----------
 const analyzeHandler = async (req, res) => {
   const start = Date.now();
-  const { businessName, websiteUrl, businessType, serviceArea } = req.body || {};
+  const { businessName, websiteUrl, businessType, serviceArea, selectedPlaceId } = req.body || {};
   const quickMode = req.query.quick === "1";
 
   console.log('[ANALYZE] start', {
-    quickMode, path: req.path, businessName, serviceArea, businessType
+    quickMode, path: req.path, businessName, serviceArea, businessType, selectedPlaceId
   });
 
   // Quick mode
@@ -534,6 +578,85 @@ const analyzeHandler = async (req, res) => {
 
   const effectiveServiceArea = (serviceArea || "").toString().trim();
 
+  // Fast path: the UI already gave us the chosen place
+  if (selectedPlaceId) {
+    const det = await fetchPlaceDetails(selectedPlaceId);
+    if (det) {
+      const picked = {
+        place_id: selectedPlaceId,
+        name: det.name,
+        website: det.website,
+        rating: det.rating,
+        user_ratings_total: det.user_ratings_total,
+        formatted_address: det.formatted_address
+      };
+
+      const googleData = {
+        rating: picked.rating ?? 0,
+        reviewCount: picked.user_ratings_total ?? 0
+      };
+
+      const embedTarget = `place_id:${picked.place_id}`;
+      const mapEmbedUrl = buildMapEmbedUrl(embedTarget);
+
+      // Gemini (optional)
+      let geminiAnalysis = { scores: {}, topPriority: "", competitorAdAnalysis: "", reviewSentiment: "" };
+      if (model) {
+        const prompt = `
+Analyze a local contractor:
+- Business: "${businessName}"
+- Market: "${effectiveServiceArea || "unknown"}"
+- Model: "${businessType}"
+- Website: "${normalizedWebsite}"
+
+Return ONLY JSON:
+{
+  "scores": { "painPointResonance": 0-100, "ctaStrength": 0-100, "websiteHealth": 0-100, "onPageSEO": 0-100 },
+  "topPriority": "<one actionable next step>",
+  "competitorAdAnalysis": "<themes/offers>",
+  "reviewSentiment": "<biggest positive theme>"
+}`.trim();
+
+        try {
+          const gen = await withTimeout(
+            model.generateContent({
+              contents: [{ role: "user", parts: [{ text: prompt }] }],
+              generationConfig: { maxOutputTokens: 1024 }
+            }),
+            7000,
+            "Gemini timeout"
+          );
+          const raw = gen?.response?.text() || "";
+          const match = raw.match(/{[\s\S]*}/);
+          if (match) geminiAnalysis = JSON.parse(match[0]);
+        } catch (e) {
+          console.warn("Gemini step skipped:", e.message);
+        }
+      }
+
+      const { finalScore, detailedScores } = calculateFinalScore(
+        googleData,
+        geminiAnalysis.scores || {},
+        businessType
+      );
+
+      console.log(`[ANALYZE] done (selected) in ${Date.now() - start}ms`, {
+        placeId: picked.place_id, rating: googleData.rating, reviews: googleData.reviewCount, finalScore
+      });
+
+      return res.status(200).json({
+        success: true,
+        finalScore,
+        detailedScores,
+        geminiAnalysis,
+        topCompetitor: null,
+        mapEmbedUrl,
+        clarifications: []
+      });
+    }
+    // if details fetch failed, continue into normal resolution flow below
+  }
+
   try {
     const candidates = await resolvePlaceCandidates({
       businessName,
@@ -577,7 +700,26 @@ const analyzeHandler = async (req, res) => {
       };
     }));
 
-    const picked = pickBestCandidateByWebsite(enriched, normalizedWebsite) || enriched[0];
+    // If multiple & no exact domain match -> ask the user to choose
+    const byExactDomain = (c) => c.website && normalizeHost(c.website) === normalizeHost(normalizedWebsite);
+    const exactDomain = enriched.find(byExactDomain);
+
+    if (!exactDomain && enriched.length > 1) {
+      const candidatesPayload = enriched.map(c => ({
+        placeId: c.place_id,
+        name: c.name,
+        address: c.formatted_address,
+        rating: c.rating ?? 0,
+        reviews: c.user_ratings_total ?? 0
+      }));
+      return res.status(200).json({
+        success: false,
+        message: "Multiple possible matches found. Please select the correct business.",
+        candidates: candidatesPayload
+      });
+    }
+
+    const picked = exactDomain || pickBestCandidateByWebsite(enriched, normalizedWebsite) || enriched[0];
     const userDetails = picked || null;
 
     const googleData = {
