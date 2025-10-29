@@ -30,8 +30,54 @@ function bar(label, value) {
     </div>`;
 }
 
+// --- Clarifications UI ---
+function renderClarifications(list = []) {
+  if (!Array.isArray(list) || !list.length) return "";
+  const items = list.map((c, idx) => {
+    const msg = c.message || "Want me to try a fix?";
+    const btn = c.suggestion
+      ? `<button type="button" class="clar-btn" data-i="${idx}">${esc(c.suggestion.label || "Apply suggestion")}</button>`
+      : "";
+    return `
+      <div class="row" style="border:1px solid #e5e7eb;border-radius:12px;padding:12px">
+        <div class="logic-explainer" style="margin-bottom:8px">${esc(msg)}</div>
+        ${btn}
+      </div>`;
+  }).join("");
+
+  return `
+    <div class="row" style="margin-top:16px">
+      <strong>Suggestions to refine your search</strong>
+    </div>
+    ${items}
+  `;
+}
+
+function wireClarificationButtons(clarifications) {
+  const buttons = results.querySelectorAll(".clar-btn");
+  buttons.forEach(btn => {
+    btn.addEventListener("click", () => {
+      const i = Number(btn.getAttribute("data-i"));
+      const s = clarifications?.[i]?.suggestion;
+      if (!s) return;
+
+      // Patch the appropriate field and re-run
+      if (s.field === "serviceArea") {
+        document.getElementById("serviceArea").value = s.value || "";
+      } else if (s.field === "websiteUrl") {
+        document.getElementById("websiteUrl").value = s.value || "";
+      } else if (s.field === "businessName") {
+        document.getElementById("businessName").value = s.value || "";
+      }
+      // Auto submit again with same fast/normal mode
+      form.requestSubmit();
+    });
+  });
+}
+
+// --- Main result UI ---
 function renderResult(payload) {
-  const { finalScore, detailedScores, geminiAnalysis, topCompetitor, mapEmbedUrl } = payload;
+  const { finalScore, detailedScores, geminiAnalysis, topCompetitor, mapEmbedUrl, clarifications } = payload;
 
   let html = `
     <div class="score">Overall Score: ${finalScore}%</div>
@@ -73,7 +119,11 @@ function renderResult(payload) {
       </div>`;
   }
 
+  // Clarification cards (may be empty on success)
+  html += renderClarifications(clarifications);
+
   results.innerHTML = html;
+  wireClarificationButtons(clarifications);
 }
 
 form.addEventListener("submit", async (e) => {
@@ -104,7 +154,15 @@ form.addEventListener("submit", async (e) => {
     });
 
     const data = await res.json().catch(() => ({}));
+
+    // If API returned clarifications with an error (e.g., 404 no GBP), surface them
     if (!res.ok || !data?.success) {
+      const clar = Array.isArray(data?.clarifications) ? data.clarifications : [];
+      if (clar.length) {
+        results.innerHTML = renderClarifications(clar);
+        wireClarificationButtons(clar);
+        throw new Error(data?.message || data?.error || "Try one of the suggestions above.");
+      }
       throw new Error(data?.message || data?.error || "Analysis failed.");
     }
 
