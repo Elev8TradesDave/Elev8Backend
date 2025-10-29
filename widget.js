@@ -1,17 +1,22 @@
+<!-- widget.js -->
+<script>
 // Works on Render and localhost
-const API_PATH = "/api/analyze";
+const API_PATH = (window.__API_PATH || "/api/analyze");
 
+// Basic escaping for any injected text
 function esc(s) { return String(s ?? "").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
+// Normalize URL input (accepts bare domains too)
 function normalizeWebsite(raw) {
   let v = (raw || "").trim();
   if (!v) return "";
   try {
     const u = new URL(v);
-    u.protocol = "https:";
+    u.protocol = "https:"; // force https
     return u.toString().replace(/\/+$/, "");
   } catch {
-    return ("https://" + v.replace(/^\/*/, "")).replace(/\/+$/, "");
+    const guess = ("https://" + v.replace(/^\/*/, "")).replace(/\/+$/, "");
+    try { new URL(guess); return guess; } catch { return ""; }
   }
 }
 
@@ -78,7 +83,7 @@ function renderResult(payload) {
   const { finalScore, detailedScores, geminiAnalysis, topCompetitor, mapEmbedUrl, clarifications } = payload;
 
   let html = `
-    <div class="score">Overall Score: ${finalScore}%</div>
+    <div class="score">Overall Score: ${esc(finalScore)}%</div>
     ${bar("Overall Rating", detailedScores["Overall Rating"])}
     ${bar("Review Volume", detailedScores["Review Volume"])}
     ${bar("Pain Point Resonance", detailedScores["Pain Point Resonance"])}
@@ -112,14 +117,20 @@ function renderResult(payload) {
 
   if (mapEmbedUrl) {
     html += `
-      <div class="map-container">
-        <iframe src="${esc(mapEmbedUrl)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe>
+      <div class="map-container" aria-label="Business location map">
+        <iframe src="${esc(mapEmbedUrl)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen title="Map"></iframe>
       </div>`;
   }
 
   html += renderClarifications(clarifications);
   results.innerHTML = html;
   wireClarificationButtons(clarifications);
+}
+
+// Simple inline loader
+function setLoading(on) {
+  analyzeButton.disabled = on;
+  analyzeButton.textContent = on ? "Analyzing…" : "Analyze My Business";
 }
 
 form.addEventListener("submit", async (e) => {
@@ -138,11 +149,10 @@ form.addEventListener("submit", async (e) => {
     return;
   }
 
-  analyzeButton.disabled = true;
-  analyzeButton.textContent = "Analyzing…";
+  setLoading(true);
 
   try {
-    const qs = fastMode.checked ? "?quick=1" : "";
+    const qs = fastMode?.checked ? "?quick=1" : "";
     const res = await fetch(`${API_PATH}${qs}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -150,6 +160,8 @@ form.addEventListener("submit", async (e) => {
     });
 
     const data = await res.json().catch(() => ({}));
+    // Keep last payload handy for quick debugging
+    window.__lastAnalysis = data;
 
     if (!res.ok || !data?.success) {
       const clar = Array.isArray(data?.clarifications) ? data.clarifications : [];
@@ -167,7 +179,7 @@ form.addEventListener("submit", async (e) => {
     formError.textContent = err.message || "Something went wrong.";
     formError.style.display = "block";
   } finally {
-    analyzeButton.disabled = false;
-    analyzeButton.textContent = "Analyze My Business";
+    setLoading(false);
   }
 });
+</script>

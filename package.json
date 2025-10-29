@@ -1,26 +1,38 @@
 {
   "name": "elev8trades-backend",
   "version": "1.0.0",
-  "description": "",
-  "type": "commonjs",
+  "description": "Elev8Trades local visibility analysis backend (Render-friendly, IPv6-safe)",
+  "private": true,
   "main": "api/server.js",
-  "scripts": {
-    "start": "node api/server.js",
-    "dev": "node api/server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.17 <23"
   },
-  "engines": { "node": "20.x" },
-  "license": "ISC",
+  "scripts": {
+    "dev": "nodemon api/server.js",
+    "start": "node api/server.js",
+    "start:prod": "node api/server.js"
+  },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
-    "@googlemaps/google-maps-services-js": "^3.4.2",
-    "@sparticuz/chromium": "^140.0.0",
+    "@google/generative-ai": "^0.17.2",
+    "@googlemaps/google-maps-services-js": "^3.4.1",
+    "@sparticuz/chromium": "^124.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^5.1.0",
-    "express-rate-limit": "^8.1.0",
-    "helmet": "^8.1.0",
-    "puppeteer-core": "^24.22.3",
-    "serverless-http": "^4.0.0"
-  }
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.2.0",
+    "helmet": "^7.1.0",
+    "puppeteer-core": "^22.10.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  },
+  "keywords": [
+    "google-places",
+    "local-seo",
+    "maps",
+    "contractor",
+    "render",
+    "elev8trades"
+  ]
 }
