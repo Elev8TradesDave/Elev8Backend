@@ -8,7 +8,7 @@ function normalizeWebsite(raw) {
   if (!v) return "";
   try {
     const u = new URL(v);
-    u.protocol = "https:";                 // force https
+    u.protocol = "https:";
     return u.toString().replace(/\/+$/, "");
   } catch {
     return ("https://" + v.replace(/^\/*/, "")).replace(/\/+$/, "");
@@ -61,7 +61,6 @@ function wireClarificationButtons(clarifications) {
       const s = clarifications?.[i]?.suggestion;
       if (!s) return;
 
-      // Patch the appropriate field and re-run
       if (s.field === "serviceArea") {
         document.getElementById("serviceArea").value = s.value || "";
       } else if (s.field === "websiteUrl") {
@@ -69,7 +68,6 @@ function wireClarificationButtons(clarifications) {
       } else if (s.field === "businessName") {
         document.getElementById("businessName").value = s.value || "";
       }
-      // Auto submit again with same fast/normal mode
       form.requestSubmit();
     });
   });
@@ -119,9 +117,7 @@ function renderResult(payload) {
       </div>`;
   }
 
-  // Clarification cards (may be empty on success)
   html += renderClarifications(clarifications);
-
   results.innerHTML = html;
   wireClarificationButtons(clarifications);
 }
@@ -155,7 +151,6 @@ form.addEventListener("submit", async (e) => {
 
     const data = await res.json().catch(() => ({}));
 
-    // If API returned clarifications with an error (e.g., 404 no GBP), surface them
     if (!res.ok || !data?.success) {
       const clar = Array.isArray(data?.clarifications) ? data.clarifications : [];
       if (clar.length) {

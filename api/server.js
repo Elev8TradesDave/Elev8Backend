@@ -16,17 +16,13 @@ const chromium = require("@sparticuz/chromium");
 const path = require("path");
 
 // ---------- CONFIG ----------
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 10000; // Render binds automatically; 10000 is fine locally
 const ENABLE_AD_SCRAPE = /^true$/i.test(process.env.ENABLE_AD_SCRAPE || "false");
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
-// Keys (SPLIT)
-const MAPS_SERVER = process.env.GOOGLE_MAPS_API_KEY || "";   // server: Places/Geocoding
+// Keys (split)
+const MAPS_SERVER = process.env.GOOGLE_MAPS_API_KEY || "";   // server: Places, Geocoding
 const MAPS_EMBED  = process.env.GOOGLE_MAPS_EMBED_KEY || ""; // browser: Maps Embed (referrer-restricted)
-
-// Gemini (optional)
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-1.5-pro"; // override if needed
 
 // ---------- APP ----------
 const app = express();
@@ -81,13 +77,13 @@ app.use(
     max: 60,
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => ipFromReq(req),
+    keyGenerator: ipFromReq,
     validate: false,
     skipFailedRequests: true
   })
 );
 
-// Stop browsers from hitting the lambda for icons
+// Stop browsers from hitting the server for icons
 app.use("/favicon.ico", (_req, res) => res.status(204).end());
 app.use("/favicon.png", (_req, res) => res.status(204).end());
 
@@ -108,14 +104,14 @@ const healthHandler = (_req, res) =>
     ok: true,
     mapsKeyPresent: Boolean(MAPS_SERVER),
     embedKeyPresent: Boolean(MAPS_EMBED),
-    geminiKeyPresent: Boolean(GEMINI_API_KEY),
-    env: process.env.NODE_ENV || "unknown",
+    geminiKeyPresent: Boolean(process.env.GEMINI_API_KEY),
+    env: process.env.NODE_ENV || "unknown"
   });
 
 app.get("/api/health", healthHandler);
 app.get("/health", healthHandler);
 
-// ---------- ROUTE-SCOPED ENV CHECKS ----------
+// ---------- ENV CHECK ----------
 function requireEnv(keys, res) {
   const missing = keys.filter((k) => !process.env[k]);
   if (missing.length) {
@@ -128,11 +124,16 @@ function requireEnv(keys, res) {
 
 // ---------- CLIENTS ----------
 const mapsClient = new Client({});
-const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
-const model = genAI ? genAI.getGenerativeModel({ model: GEMINI_MODEL }) : null;
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+// FIX: Use v1 model name that exists
+const model = process.env.GEMINI_API_KEY
+  ? genAI.getGenerativeModel({ model: "gemini-1.5-pro-latest" })
+  : null;
 
 // ---------- UTILS ----------
 const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
+const normalizeHost = (h) => (h || "").toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*/, "");
+const looksLikeDomain = (s="") => /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(s);
 
 const isHttpUrl = (u) => {
   try {
@@ -162,63 +163,8 @@ const errPayload = (e) => {
       : data
       ? JSON.stringify(data).slice(0, 300)
       : undefined;
-  return { msg: e?.message, status, data: dataStr, stack: e?.stack };
+  return { msg: e?.message, status, data: dataStr };
 };
-
-const normalizeHost = (h) =>
-  (h || "").toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*/, "");
-
-function hostFromUrl(u="") {
-  try { return new URL(u).hostname.toLowerCase().replace(/^www\./,""); }
-  catch { return String(u).toLowerCase().replace(/^https?:\/\//,"").replace(/^www\./,"").replace(/\/.*/,""); }
-}
-
-function levenshtein(a = "", b = "") {
-  a = String(a); b = String(b);
-  const m = a.length, n = b.length;
-  if (!m) return n; if (!n) return m;
-  const dp = Array.from({length: m+1}, () => Array(n+1).fill(0));
-  for (let i=0;i<=m;i++) dp[i][0] = i;
-  for (let j=0;j<=n;j++) dp[0][j] = j;
-  for (let i=1;i<=m;i++) for (let j=1;j<=n;j++) {
-    const cost = a[i-1] === b[j-1] ? 0 : 1;
-    dp[i][j] = Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost);
-  }
-  return dp[m][n];
-}
-
-function stateAbbrevFromAddress(addr="") {
-  const m = String(addr).match(/\b(AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)\b/);
-  return m ? m[1] : null;
-}
-
-function normalizeStateText(s="") {
-  s = s.toLowerCase().trim();
-  if (!s) return null;
-  if (/\bnew jersey\b|\bnj\b/.test(s)) return "NJ";
-  if (/\bnew york\b|\bny\b/.test(s)) return "NY";
-  if (/\bpennsylvania\b|\bpa\b/.test(s)) return "PA";
-  if (/\bconnecticut\b|\bct\b/.test(s)) return "CT";
-  return null;
-}
-
-async function buildClarificationQuestion({model, reason, suggestion}) {
-  const fallback = `${reason} — Would you like me to try “${suggestion.label}”?`;
-  if (!model) return fallback;
-  try {
-    const prompt = `Write one short, friendly question to a user (~15 words max).
-Context: ${reason}
-Offer this exact option label back to them: "${suggestion.label}".`;
-    const gen = await withTimeout(
-      model.generateContent({ contents:[{role:"user",parts:[{text:prompt}]}] }),
-      3000, "clarify timeout"
-    );
-    const t = gen?.response?.text?.() || "";
-    return (t || "").trim() || fallback;
-  } catch {
-    return fallback;
-  }
-}
 
 // ---------- AREA CLASSIFICATION + RADIUS ----------
 const US_STATES = new Set([
@@ -234,38 +180,33 @@ const US_STATES = new Set([
 function inferRegionLevelFromText(saRaw = "") {
   const s = saRaw.toLowerCase().trim();
   if (!s) return { level: "unknown", hint: null };
-
   if (US_STATES.has(s)) return { level: "state", hint: null };
   if (/\b(north|central|south|east|west|upper|lower)\s+(nj|jersey|new jersey)\b/.test(s)) return { level: "region", hint: "nj" };
   if (/\bcounty\b/.test(s)) return { level: "county", hint: null };
   if (/(,\s*)?(nj|new jersey|ny|new york|pa|pennsylvania|ct|connecticut)\b/.test(s)) return { level: "locality", hint: null };
-
   return { level: "unknown", hint: null };
 }
 
 function radiusByLevel(level) {
   switch (level) {
-    case "state":     return 200_000; // ~200 km
-    case "region":    return 120_000; // ~120 km
-    case "county":    return  60_000; // ~60 km
-    case "locality":  return  35_000; // ~35 km
-    default:          return  80_000; // fallback
+    case "state":     return 200_000;
+    case "region":    return 120_000;
+    case "county":    return  60_000;
+    case "locality":  return  35_000;
+    default:          return  80_000;
   }
 }
 
 async function geocodeServiceAreaForBias(serviceArea) {
   if (!serviceArea) return null;
   const inferred = inferRegionLevelFromText(serviceArea);
-
   try {
     const { data } = await mapsClient.geocode({
       params: { address: serviceArea, region: "us", key: MAPS_SERVER },
       timeout: 6000
     });
-
     const first = data?.results?.[0];
     if (!first) return null;
-
     const loc = first.geometry?.location;
     if (!loc) return null;
 
@@ -282,76 +223,54 @@ async function geocodeServiceAreaForBias(serviceArea) {
   }
 }
 
-// Prefer FindPlace with scaled radius; retry un-biased; fallback TextSearch.
-// Also: enrich top candidates with PlaceDetails to get 'website' for better matching.
+// ---------- PLACES HELPERS ----------
+async function tryFindPlace(params) {
+  const { data } = await mapsClient.findPlaceFromText({ params, timeout: 6000 });
+  return data?.candidates || [];
+}
+
+// Prefer FindPlace (no unsupported fields) with radius bias; retry un-biased; fallback TextSearch
 async function resolvePlaceCandidates({ businessName, serviceArea }) {
   const input = [businessName, serviceArea].filter(Boolean).join(" ").trim();
   const biasInfo = await geocodeServiceAreaForBias(serviceArea);
-
-  const tryFindPlace = async (params) => {
-    const { data } = await mapsClient.findPlaceFromText({ params, timeout: 7000 });
-    return data?.candidates || [];
-  };
 
   try {
     const baseParams = {
       input,
       inputtype: "textquery",
-      // IMPORTANT: 'website' is NOT supported in FindPlace 'fields'; removing to avoid 400
-      fields: ["place_id", "name", "formatted_address"],
+      fields: ["place_id", "name", "formatted_address"], // IMPORTANT: FindPlace does NOT support 'website'
       region: "us",
       key: MAPS_SERVER
     };
 
-    // 1) Biased search with radius scaled to area type
     if (biasInfo?.lat && biasInfo?.lng) {
       const radius = radiusByLevel(biasInfo.level || "unknown");
       const biased = await tryFindPlace({
         ...baseParams,
         locationbias: `circle:${Math.max(20_000, radius)}@${biasInfo.lat},${biasInfo.lng}`
       });
-      if (biased.length) return await enrichCandidatesWithDetails(biased);
-      // 2) Retry same query with NO bias
+      if (biased.length) return biased;
+
       const unBiased = await tryFindPlace(baseParams);
-      if (unBiased.length) return await enrichCandidatesWithDetails(unBiased);
+      if (unBiased.length) return unBiased;
     } else {
-      // No geocode → go directly un-biased
       const unBiased = await tryFindPlace(baseParams);
-      if (unBiased.length) return await enrichCandidatesWithDetails(unBiased);
+      if (unBiased.length) return unBiased;
     }
   } catch (e) {
     console.log("FindPlace miss:", errPayload(e));
   }
 
-  // 3) Fallback: TextSearch (broader)
   try {
     const { data } = await mapsClient.textSearch({
       params: { query: input, region: "us", key: MAPS_SERVER },
       timeout: 7000
     });
-    const results = data?.results || [];
-    return await enrichCandidatesWithDetails(results.map(r => ({
-      place_id: r.place_id, name: r.name, formatted_address: r.formatted_address
-    })));
+    return data?.results || [];
   } catch (e) {
     console.log("TextSearch miss:", errPayload(e));
     return [];
   }
-}
-
-async function enrichCandidatesWithDetails(cands) {
-  const lim = cands.slice(0, 5);
-  const out = [];
-  for (const c of lim) {
-    if (!c?.place_id) continue;
-    try {
-      const d = await fetchPlaceDetails(c.place_id);
-      out.push({ ...c, website: d?.website, name: d?.name || c?.name, formatted_address: d?.formatted_address || c?.formatted_address });
-    } catch {
-      out.push(c);
-    }
-  }
-  return out;
 }
 
 async function fetchPlaceDetails(placeId) {
@@ -359,7 +278,7 @@ async function fetchPlaceDetails(placeId) {
     const { data } = await mapsClient.placeDetails({
       params: {
         place_id: placeId,
-        fields: ["name", "website", "rating", "user_ratings_total", "formatted_address"],
+        fields: ["name", "website", "rating", "user_ratings_total", "formatted_address"], // website allowed here
         key: MAPS_SERVER
       },
       timeout: 6000
@@ -377,12 +296,14 @@ function pickBestCandidateByWebsite(candidates, websiteUrl) {
 
   let targetHost = null;
   try {
-    targetHost = normalizeHost(new URL(websiteUrl).hostname);
+    targetHost = new URL(websiteUrl).hostname;
   } catch {
-    targetHost = normalizeHost(websiteUrl);
+    targetHost = websiteUrl;
   }
+  targetHost = normalizeHost(targetHost);
   if (!targetHost) return candidates[0];
 
+  // If we already fetched details, candidate may not have website here; selection is revalidated later
   const exact = candidates.find((c) => c.website && normalizeHost(c.website) === targetHost);
   if (exact) return exact;
 
@@ -390,7 +311,7 @@ function pickBestCandidateByWebsite(candidates, websiteUrl) {
   return loose || candidates[0];
 }
 
-// ---------- PUPPETEER (Render-friendly) ----------
+// ---------- PUPPETEER (optional Ads scrape) ----------
 let sharedBrowserPromise;
 async function getBrowser() {
   if (!sharedBrowserPromise) {
@@ -430,8 +351,7 @@ async function scrapeGoogleAds(domain) {
       nodes.slice(0, 3).map((n) => n.innerText || "")
     );
     return ads;
-  } catch (e) {
-    console.log(`Ad scrape skipped for ${domain}: ${e.message}`);
+  } catch {
     return [];
   } finally {
     if (page) await page.close().catch(() => {});
@@ -442,7 +362,6 @@ async function scrapeGoogleAds(domain) {
 const reverseHandler = async (req, res) => {
   const { lat, lon } = req.query;
   if (!lat || !lon) return res.status(400).json({ success:false, error: "Latitude and longitude are required." });
-
   if (requireEnv(["GOOGLE_MAPS_API_KEY"], res)) return;
 
   try {
@@ -452,7 +371,7 @@ const reverseHandler = async (req, res) => {
         result_type: ["locality", "political"],
         key: MAPS_SERVER
       },
-      timeout: 5000
+      timeout: 6000
     });
 
     const result = (data.results || [])[0];
@@ -469,7 +388,6 @@ const reverseHandler = async (req, res) => {
     return res.status(500).json({ success:false, error: "Failed to reverse geocode." });
   }
 };
-
 app.get("/api/reverse", reverseHandler);
 app.get("/reverse", reverseHandler);
 
@@ -477,24 +395,16 @@ app.get("/reverse", reverseHandler);
 const analyzeHandler = async (req, res) => {
   const start = Date.now();
   const { businessName, websiteUrl, businessType, serviceArea } = req.body || {};
-
-  // Quick mode only via ?quick=1
   const quickMode = req.query.quick === "1";
 
   console.log('[ANALYZE] start', {
-    quickMode,
-    bodyPresent: !!req.body,
-    path: req.path,
-    businessName,
-    serviceArea,
-    businessType
+    quickMode, path: req.path, businessName, serviceArea, businessType
   });
 
+  // Quick mode
   if (quickMode) {
     const effectiveServiceArea = (serviceArea || "").toString().trim();
     const q = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName;
-
-    console.log('[ANALYZE] Quick mode forced via query param.');
     return res.status(200).json({
       success: true,
       finalScore: 70,
@@ -514,24 +424,38 @@ const analyzeHandler = async (req, res) => {
       },
       topCompetitor: null,
       mapEmbedUrl: buildMapEmbedUrl(q),
-      clarifications: []
+      clarifications: [] // none in quick mode
     });
   }
 
   // Validate input for full run
   if (!businessName || !websiteUrl || !businessType) {
-    return res.status(400).json({ success: false, message: "Please complete all required fields." });
+    return res.status(400).json({
+      success: false,
+      message: "Please complete all required fields.",
+      clarifications: [{
+        message: "Missing fields. Please complete Business Name, Website URL, and Business Type."
+      }]
+    });
   }
   const normalizedWebsite = isHttpUrl(websiteUrl)
     ? websiteUrl
     : `https://${websiteUrl.replace(/^\/*/, "")}`;
   if (!isHttpUrl(normalizedWebsite)) {
-    return res.status(400).json({ success: false, message: "Invalid websiteUrl" });
+    const raw = (websiteUrl || "").trim();
+    const suggestion = looksLikeDomain(raw) ? `https://${raw}` : "";
+    return res.status(400).json({
+      success: false,
+      message: "Invalid website URL.",
+      clarifications: suggestion ? [{
+        message: `Did you mean “${suggestion}”?`,
+        suggestion: { field: "websiteUrl", value: suggestion, label: "Use suggested URL" }
+      }] : []
+    });
   }
   if (!["specialty", "maintenance"].includes(businessType)) {
     return res.status(400).json({ success: false, message: "Invalid businessType" });
   }
-
   if (requireEnv(["GOOGLE_MAPS_API_KEY"], res)) return;
 
   const effectiveServiceArea = (serviceArea || "").toString().trim();
@@ -540,103 +464,56 @@ const analyzeHandler = async (req, res) => {
     const candidates = await resolvePlaceCandidates({ businessName, serviceArea: effectiveServiceArea });
     console.log('[ANALYZE] candidates', { count: candidates?.length || 0, serviceArea: effectiveServiceArea });
 
-    const clarifications = [];
-
     if (!candidates.length) {
-      const saState = normalizeStateText(effectiveServiceArea);
-      if (saState) {
-        const reason = `I couldn’t find a GBP using the whole state (${saState}).`;
-        const suggestion = { field: "serviceArea", value: "Newark, NJ", label: "Try Newark, NJ" };
-        clarifications.push({
-          type: "serviceArea_narrow",
-          message: await buildClarificationQuestion({ model, reason, suggestion }),
-          suggestion
+      const clar = [];
+      if (!effectiveServiceArea) {
+        clar.push({
+          message: "I didn’t find a Google Business Profile. Try adding a city or region.",
+          suggestion: { field: "serviceArea", value: "Newark, NJ", label: "Try: Newark, NJ" }
         });
       } else {
-        clarifications.push({
-          type: "try_city",
-          message: "No exact match yet—want to try adding a city (e.g., “Plainfield, NJ”)?",
-          suggestion: { field: "serviceArea", value: "Plainfield, NJ", label: "Use Plainfield, NJ" }
+        clar.push({
+          message: `No matches for “${businessName}” in “${effectiveServiceArea}”. Try a nearby city or confirm spelling.`,
+          suggestion: { field: "serviceArea", value: "Jersey City, NJ", label: "Try: Jersey City, NJ" }
         });
       }
       return res.status(404).json({
-        success: false,
-        error: "No Google Business Profile found for this query.",
-        clarifications
+        success:false,
+        error:"No Google Business Profile found for this query.",
+        clarifications: clar
       });
     }
 
-    const picked = pickBestCandidateByWebsite(candidates, normalizedWebsite);
-    const userDetails = picked?.place_id ? await fetchPlaceDetails(picked.place_id) : null;
+    // Pull details for each candidate to get website fields before choosing
+    const enriched = await Promise.all(candidates.slice(0, 5).map(async c => {
+      const det = c.place_id ? await fetchPlaceDetails(c.place_id) : null;
+      return { ...c, website: det?.website, rating: det?.rating, user_ratings_total: det?.user_ratings_total };
+    }));
 
-    // State mismatch clarification
-    const resultState = stateAbbrevFromAddress(userDetails?.formatted_address || picked?.formatted_address || "");
-    const desiredState = normalizeStateText(effectiveServiceArea);
-    if (desiredState && resultState && desiredState !== resultState) {
-      const reason = `I found “${userDetails?.name || picked?.name}” in ${resultState}, not ${desiredState}.`;
-      const suggestion = { field: "serviceArea", value: `${resultState}`, label: `Search ${resultState} instead` };
-      clarifications.push({
-        type: "state_mismatch",
-        message: await buildClarificationQuestion({ model, reason, suggestion }),
-        suggestion
-      });
-    }
-
-    // Website typo clarification
-    if (userDetails?.website) {
-      const inputHost = hostFromUrl(normalizedWebsite);
-      const gbpHost   = hostFromUrl(userDetails.website);
-      if (inputHost && gbpHost && inputHost !== gbpHost) {
-        const dist = levenshtein(inputHost, gbpHost);
-        if (dist <= 3 || inputHost.replace(/[^a-z]/g,"") === gbpHost.replace(/[^a-z]/g,"")) {
-          const suggestion = { field: "websiteUrl", value: userDetails.website, label: `Use ${gbpHost}` };
-          clarifications.push({
-            type: "website_typo",
-            message: await buildClarificationQuestion({
-              model,
-              reason: `Your website looks different from the GBP site I found (${gbpHost}).`,
-              suggestion
-            }),
-            suggestion
-          });
-        } else if (!/\./.test(inputHost)) {
-          const guess = `${inputHost}.com`;
-          clarifications.push({
-            type: "website_missing_tld",
-            message: `Website might be missing “.com”. Try ${guess}?`,
-            suggestion: { field: "websiteUrl", value: `https://${guess}`, label: `Use ${guess}` }
-          });
-        }
-      }
-    }
+    const picked = pickBestCandidateByWebsite(enriched, normalizedWebsite) || enriched[0];
+    const userDetails = picked || null;
 
     const googleData = {
       rating: userDetails?.rating ?? 0,
       reviewCount: userDetails?.user_ratings_total ?? 0
     };
 
-    // Competitor: take next candidate if available
+    // Competitor: any other candidate
     let topCompetitorData = null;
     let competitorAds = [];
-    const competitorCandidate = candidates.find((c) => c.place_id && c.place_id !== picked.place_id);
+    const competitorCandidate = enriched.find((c) => c.place_id && c.place_id !== picked.place_id);
     if (competitorCandidate) {
-      try {
-        const cd = await fetchPlaceDetails(competitorCandidate.place_id);
-        if (cd?.website) {
-          topCompetitorData = { name: cd.name || competitorCandidate.name, website: cd.website };
-          try {
-            const domain = new URL(cd.website).hostname;
-            competitorAds = await scrapeGoogleAds(domain);
-          } catch {}
-        } else {
-          topCompetitorData = { name: cd?.name || competitorCandidate.name, website: null };
-        }
-      } catch (e) {
-        console.log("Competitor details skipped:", e.message);
+      topCompetitorData = {
+        name: competitorCandidate?.name,
+        website: competitorCandidate?.website || null
+      };
+      if (competitorCandidate?.website) {
+        try {
+          competitorAds = await scrapeGoogleAds(new URL(competitorCandidate.website).hostname);
+        } catch {}
       }
     }
 
-    // Map embed
     const embedTarget = picked?.place_id
       ? `place_id:${picked.place_id}`
       : (effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName);
@@ -683,10 +560,18 @@ Return ONLY JSON:
       businessType
     );
 
-    console.log(
-      `[ANALYZE] done in ${Date.now() - start}ms`,
-      { placeId: picked?.place_id, rating: googleData.rating, reviews: googleData.reviewCount, finalScore }
-    );
+    console.log(`[ANALYZE] done in ${Date.now() - start}ms`, {
+      placeId: picked?.place_id, rating: googleData.rating, reviews: googleData.reviewCount, finalScore
+    });
+
+    // Clarify if geo likely wrong (NJ intent but result far away)
+    const clarifications = [];
+    if (/new jersey|nj/i.test(effectiveServiceArea) && userDetails?.formatted_address && /,\s*KS\b/i.test(userDetails.formatted_address)) {
+      clarifications.push({
+        message: `I found a match in Kansas. Want to narrow to New Jersey?`,
+        suggestion: { field: "serviceArea", value: "New Jersey", label: "Search New Jersey only" }
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -701,7 +586,8 @@ Return ONLY JSON:
     console.error("[ANALYZE] FAIL", errPayload(error));
     return res.status(500).json({
       success: false,
-      error: error?.message || "Analyze failed"
+      error: error?.message || "Analyze failed",
+      clarifications: []
     });
   }
 };
@@ -712,8 +598,6 @@ app.post("/analyze", analyzeHandler);
 // ---------- SCORING ----------
 function calculateFinalScore(googleData, geminiScores, businessType) {
   const ratingScore = clampPct((Number(googleData.rating || 0) / 5) * 100);
-
-  // Log curve for review volume: 1→0, 10→~25, 100→~50, 1k→~75, 10k→~100
   const rc = Number(googleData.reviewCount || 0);
   const reviewScore = clampPct(Math.log10(Math.max(rc, 1)) * 25);
 
@@ -756,7 +640,7 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
   };
 }
 
-// ---------- START SERVER (Render) ----------
+// ---------- START SERVER ----------
 app
   .listen(PORT, () => {
     console.log(
@@ -767,5 +651,4 @@ app
     console.error("Server listen failed:", err);
   });
 
-// Export app for tests (optional)
 module.exports = app;
