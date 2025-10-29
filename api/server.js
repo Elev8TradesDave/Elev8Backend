@@ -127,7 +127,7 @@ const mapsClient = new Client({});
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 // Use a widely-available model to avoid v1beta 404s
 const model = process.env.GEMINI_API_KEY
-  ? genAI.getGenerativeModel({ model: "gemini-1.5-flash" })
+  ? genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" })
   : null;
 
 // ---------- UTILS ----------
@@ -182,24 +182,45 @@ function normalizeServiceArea(sa = "") {
   return s.replace(/\b[a-z]/g, (m) => m.toUpperCase());
 }
 
+// ---------- STATE CODE HELPERS (case-insensitive; full names + 2-letter) ----------
+const STATE_NAME_TO_CODE = {
+  "alabama":"AL","alaska":"AK","arizona":"AZ","arkansas":"AR","california":"CA","colorado":"CO",
+  "connecticut":"CT","delaware":"DE","district of columbia":"DC","dc":"DC","florida":"FL","georgia":"GA",
+  "hawaii":"HI","idaho":"ID","illinois":"IL","indiana":"IN","iowa":"IA","kansas":"KS","kentucky":"KY",
+  "louisiana":"LA","maine":"ME","maryland":"MD","massachusetts":"MA","michigan":"MI","minnesota":"MN",
+  "mississippi":"MS","missouri":"MO","montana":"MT","nebraska":"NE","nevada":"NV","new hampshire":"NH",
+  "new jersey":"NJ","new mexico":"NM","new york":"NY","north carolina":"NC","north dakota":"ND","ohio":"OH",
+  "oklahoma":"OK","oregon":"OR","pennsylvania":"PA","rhode island":"RI","south carolina":"SC",
+  "south dakota":"SD","tennessee":"TN","texas":"TX","utah":"UT","vermont":"VT","virginia":"VA",
+  "washington":"WA","west virginia":"WV","wisconsin":"WI","wyoming":"WY"
+};
+
+function serviceAreaStateCode(sa = "") {
+  const s = String(sa).trim().toLowerCase();
+
+  // two-letter code anywhere
+  const m = s.match(
+    /\b(al|ak|az|ar|ca|co|ct|de|dc|fl|ga|hi|id|il|in|ia|ks|ky|la|me|md|ma|mi|mn|ms|mo|mt|ne|nv|nh|nj|nm|ny|nc|nd|oh|ok|or|pa|ri|sc|sd|tn|tx|ut|vt|va|wa|wv|wi|wy)\b/i
+  );
+  if (m) return m[1].toUpperCase();
+
+  // full name
+  for (const name in STATE_NAME_TO_CODE) {
+    if (s.includes(name)) return STATE_NAME_TO_CODE[name];
+  }
+  return null;
+}
+
 // ---------- AREA CLASSIFICATION + RADIUS ----------
-const US_STATES = new Set([
-  "alabama","alaska","arizona","arkansas","california","colorado","connecticut","delaware",
-  "district of columbia","dc","florida","georgia","hawaii","idaho","illinois","indiana","iowa",
-  "kansas","kentucky","louisiana","maine","maryland","massachusetts","michigan","minnesota",
-  "mississippi","missouri","montana","nebraska","nevada","new hampshire","new jersey",
-  "new mexico","new york","north carolina","north dakota","ohio","oklahoma","oregon",
-  "pennsylvania","rhode island","south carolina","south dakota","tennessee","texas","utah",
-  "vermont","virginia","washington","west virginia","wisconsin","wyoming"
-]);
+const US_STATES = new Set(Object.keys(STATE_NAME_TO_CODE));
 
 function inferRegionLevelFromText(saRaw = "") {
   const s = saRaw.toLowerCase().trim();
   if (!s) return { level: "unknown", hint: null };
   if (US_STATES.has(s)) return { level: "state", hint: null };
-  if (/\b(north|central|south|east|west|upper|lower)\s+(nj|jersey|new jersey)\b/.test(s)) return { level: "region", hint: "nj" };
-  if (/\bcounty\b/.test(s)) return { level: "county", hint: null };
-  if (/(,\s*)?(nj|new jersey|ny|new york|pa|pennsylvania|ct|connecticut)\b/.test(s)) return { level: "locality", hint: null };
+  if (/\b(north|central|south|east|west|upper|lower)\s+(nj|jersey|new jersey)\b/i.test(s)) return { level: "region", hint: "nj" };
+  if (/\bcounty\b/i.test(s)) return { level: "county", hint: null };
+  if (/(,\s*)?(nj|new jersey|ny|new york|pa|pennsylvania|ct|connecticut)\b/i.test(s)) return { level: "locality", hint: null };
   return { level: "unknown", hint: null };
 }
 
@@ -208,7 +229,7 @@ function radiusByLevel(level) {
     case "state":     return 200_000;
     case "region":    return 120_000;
     case "county":    return  60_000;
-    case "locality":  return  35_000;
+    case "locality":  return  50_000; // increased from 35k
     default:          return  80_000;
   }
 }
@@ -247,10 +268,11 @@ async function tryFindPlace(params) {
 }
 
 // Robust resolver: tries domain, name+area variants, with FindPlace/TextSearch
-async function resolvePlaceCandidates({ businessName, serviceArea, websiteUrl }) {
+async function resolvePlaceCandidates({ businessName, serviceArea, websiteUrl, businessType }) {
   const cleanedName = cleanBusinessName(businessName || "");
   const normalizedSA = normalizeServiceArea(serviceArea || "");
   const biasInfo = await geocodeServiceAreaForBias(normalizedSA);
+  const stateHint = serviceAreaStateCode(normalizedSA);
 
   // Domain host from website
   let host = "";
@@ -258,6 +280,7 @@ async function resolvePlaceCandidates({ businessName, serviceArea, websiteUrl })
     host = normalizeHost(websiteUrl || "");
   }
 
+  // helpers
   const tryFind = async (q, withBias = true) => {
     const base = {
       input: q,
@@ -266,9 +289,15 @@ async function resolvePlaceCandidates({ businessName, serviceArea, websiteUrl })
       region: "us",
       key: MAPS_SERVER
     };
-    const params = (withBias && biasInfo?.lat && biasInfo?.lng)
-      ? { ...base, locationbias: `circle:${Math.max(20000, radiusByLevel(biasInfo.level || "unknown"))}@${biasInfo.lat},${biasInfo.lng}` }
-      : base;
+    const params =
+      withBias && biasInfo?.lat && biasInfo?.lng
+        ? {
+            ...base,
+            locationbias: `circle:${Math.max(20000, radiusByLevel(biasInfo.level || "unknown"))}@${
+              biasInfo.lat
+            },${biasInfo.lng}`
+          }
+        : base;
     const out = await tryFindPlace(params);
     return out;
   };
@@ -280,8 +309,19 @@ async function resolvePlaceCandidates({ businessName, serviceArea, websiteUrl })
       params.radius = Math.max(20000, radiusByLevel(biasInfo.level || "unknown"));
     }
     const { data } = await mapsClient.textSearch({ params, timeout: 7000 });
-    return data?.results || [];
+    let results = data?.results || [];
+
+    // State hint filter: keep results whose formatted_address ends with ", XX"
+    if (stateHint) {
+      const re = new RegExp(`,\\s*${stateHint}\\b`, "i");
+      results = results.filter(r => re.test(r.formatted_address || ""));
+    }
+    return results;
   };
+
+  // Build query variants
+  const nospaceName = cleanedName.replace(/\s+/g, "");
+  const specialtyTerm = businessType === "specialty" ? "roofing contractor" : "maintenance";
 
   const variants = [
     host && { type: "find", q: host, bias: true },
@@ -290,10 +330,10 @@ async function resolvePlaceCandidates({ businessName, serviceArea, websiteUrl })
     cleanedName && normalizedSA && { type: "find", q: `${cleanedName} ${normalizedSA}`, bias: true },
     cleanedName && normalizedSA && { type: "find", q: `${cleanedName} ${normalizedSA}`, bias: false },
 
-    cleanedName && { type: "find", q: cleanedName, bias: false },
+    nospaceName && normalizedSA && { type: "text", q: `${nospaceName} ${normalizedSA}`, bias: true },
+    cleanedName && normalizedSA && { type: "text", q: `${cleanedName} ${specialtyTerm} ${normalizedSA}`, bias: true },
 
     host && { type: "text", q: host, bias: true },
-    cleanedName && normalizedSA && { type: "text", q: `${cleanedName} ${normalizedSA}`, bias: true },
     cleanedName && { type: "text", q: cleanedName, bias: false }
   ].filter(Boolean);
 
@@ -498,7 +538,8 @@ const analyzeHandler = async (req, res) => {
     const candidates = await resolvePlaceCandidates({
       businessName,
       serviceArea: effectiveServiceArea,
-      websiteUrl: normalizedWebsite
+      websiteUrl: normalizedWebsite,
+      businessType
     });
     console.log('[ANALYZE] candidates', { count: candidates?.length || 0, serviceArea: effectiveServiceArea });
 
@@ -524,8 +565,16 @@ const analyzeHandler = async (req, res) => {
 
     // Pull details for each candidate to get website fields before choosing
     const enriched = await Promise.all(candidates.slice(0, 5).map(async c => {
-      const det = c.place_id ? await fetchPlaceDetails(c.place_id) : null;
-      return { ...c, website: det?.website, rating: det?.rating, user_ratings_total: det?.user_ratings_total, formatted_address: det?.formatted_address || c.formatted_address };
+      const pid = c.place_id || c.placeId;
+      const det = pid ? await fetchPlaceDetails(pid) : null;
+      return {
+        ...c,
+        place_id: pid,
+        website: det?.website,
+        rating: det?.rating ?? c.rating,
+        user_ratings_total: det?.user_ratings_total ?? c.user_ratings_total,
+        formatted_address: det?.formatted_address || c.formatted_address || c.address
+      };
     }));
 
     const picked = pickBestCandidateByWebsite(enriched, normalizedWebsite) || enriched[0];
