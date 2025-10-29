@@ -1,191 +1,180 @@
-// Works on Render and localhost
-const API_PATH = "/api/analyze";
+// ---------- CONFIG ----------
+const hostProvided = (window.API_BASE || '').trim();
+const API_BASE = hostProvided; // '' => same-origin (e.g., '/api/analyze')
+const apiBaseTextEl = document.getElementById('apiBaseText');
+if (apiBaseTextEl) apiBaseTextEl.textContent = API_BASE ? API_BASE : 'same-origin';
 
-function esc(s) { return String(s ?? "").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+// ---------- DOM ----------
+const el = (id) => document.getElementById(id);
+const bName = el('businessName');
+const webUrl = el('websiteUrl');
+const area   = el('serviceArea');
+const fast   = el('fast');
 
-function normalizeWebsite(raw) {
-  let v = (raw || "").trim();
-  if (!v) return "";
-  try {
-    const u = new URL(v);
-    u.protocol = "https:";
-    return u.toString().replace(/\/+$/, "");
-  } catch {
-    return ("https://" + v.replace(/^\/*/, "")).replace(/\/+$/, "");
-  }
+const overallPct = el('overallPct');
+const overallBar = el('overallBar');
+
+const labels = [
+  { bar: el('bar1'), txt: el('sc1'), key: ['overallRating', 'Overall Rating'] },
+  { bar: el('bar2'), txt: el('sc2'), key: ['reviewVolume', 'Review Volume'] },
+  { bar: el('bar3'), txt: el('sc3'), key: ['painPointResonance', 'Pain Point Resonance'] },
+  { bar: el('bar4'), txt: el('sc4'), key: ['ctaStrength', 'Call-to-Action Strength'] },
+  { bar: el('bar5'), txt: el('sc5'), key: ['websiteHealth', 'Website Health'] },
+  { bar: el('bar6'), txt: el('sc6'), key: ['onPageSeo', 'On-Page SEO'] },
+];
+
+const nextStep = el('nextStep');
+const adThemes = el('adThemes');
+const revSent  = el('revSent');
+const mapFrame = el('mapFrame');
+
+const competitorsBox = el('competitors');
+const showCompetitorsBtn = el('showCompetitors');
+
+// Track last placeId from /analyze (helps bias competitor search)
+let LAST_PLACE_ID = null;
+
+// ---------- UI helpers ----------
+function clamp(x, lo=0, hi=100) { return Math.max(lo, Math.min(hi, x|0)); }
+function updateBar(barEl, pct) { barEl.style.width = clamp(pct) + '%'; }
+function setBusy(b){ el('analyzeBtn').disabled = !!b; if (showCompetitorsBtn) showCompetitorsBtn.disabled = !!b; }
+
+// ---------- API helpers ----------
+function url(path) {
+  // If API_BASE is '', we use same-origin like '/api/analyze'
+  return `${API_BASE}${path}`;
 }
 
-const form = document.getElementById("analysisForm");
-const analyzeButton = document.getElementById("analyzeButton");
-const results = document.getElementById("results");
-const formError = document.getElementById("formError");
-const fastMode = document.getElementById("fastMode");
-
-// transient selection state for candidate chooser (no HTML change needed)
-window.__forcePlaceId = null;
-
-function bar(label, value) {
-  const v = Math.max(0, Math.min(100, Math.round(value || 0)));
-  return `
-    <div class="row">
-      <div class="bar-value"><strong>${esc(label)}:</strong> ${v}%</div>
-      <div class="bar-container"><div class="bar" style="width:${v}%"></div></div>
-    </div>`;
-}
-
-// --- Clarifications UI ---
-function renderClarifications(list = []) {
-  if (!Array.isArray(list) || !list.length) return "";
-  const items = list.map((c, idx) => {
-    const msg = c.message || "Want me to try a fix?";
-    const btn = c.suggestion
-      ? `<button type="button" class="clar-btn" data-i="${idx}">${esc(c.suggestion.label || "Apply suggestion")}</button>`
-      : "";
-    return `
-      <div class="row" style="border:1px solid #e5e7eb;border-radius:12px;padding:12px">
-        <div class="logic-explainer" style="margin-bottom:8px">${esc(msg)}</div>
-        ${btn}
-      </div>`;
-  }).join("");
-
-  return `
-    <div class="row" style="margin-top:16px">
-      <strong>Suggestions to refine your search</strong>
-    </div>
-    ${items}
-  `;
-}
-
-function wireClarificationButtons(clarifications) {
-  const buttons = results.querySelectorAll(".clar-btn");
-  buttons.forEach(btn => {
-    btn.addEventListener("click", () => {
-      const i = Number(btn.getAttribute("data-i"));
-      const s = clarifications?.[i]?.suggestion;
-      if (!s) return;
-
-      if (s.field === "serviceArea") {
-        document.getElementById("serviceArea").value = s.value || "";
-      } else if (s.field === "websiteUrl") {
-        document.getElementById("websiteUrl").value = s.value || "";
-      } else if (s.field === "businessName") {
-        document.getElementById("businessName").value = s.value || "";
-      } else if (s.field === "placeId") {
-        // lock a specific Google Place
-        window.__forcePlaceId = s.value || null;
-      }
-
-      form.requestSubmit();
-    });
+async function post(path, body) {
+  const res = await fetch(url(path), {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(body || {})
   });
+  return await res.json();
 }
 
-// --- Main result UI ---
-function renderResult(payload) {
-  const { finalScore, detailedScores, geminiAnalysis, topCompetitor, mapEmbedUrl, clarifications, hints } = payload;
-
-  let html = `
-    <div class="score">Overall Score: ${finalScore}%</div>
-    ${bar("Overall Rating", detailedScores["Overall Rating"])}
-    ${bar("Review Volume", detailedScores["Review Volume"])}
-    ${bar("Pain Point Resonance", detailedScores["Pain Point Resonance"])}
-    ${bar("Call-to-Action Strength", detailedScores["Call-to-Action Strength"])}
-    ${bar("Website Health", detailedScores["Website Health"])}
-    ${bar("On-Page SEO", detailedScores["On-Page SEO"])}
-  `;
-
-  html += `
-    <details open>
-      <summary><strong>Recommended Next Step</strong></summary>
-      <div class="logic-explainer">${esc(geminiAnalysis?.topPriority || "No suggestion")}</div>
-    </details>
-    <details>
-      <summary><strong>Competitor Ad Themes</strong></summary>
-      <div class="logic-explainer">${esc(geminiAnalysis?.competitorAdAnalysis || "—")}</div>
-      ${hints && hints.adsEnabled === false
-        ? `<div class="hint">Ads scraping is disabled in production. Enable it in env to see live ad themes.</div>`
-        : ""}
-    </details>
-    <details>
-      <summary><strong>Review Sentiment</strong></summary>
-      <div class="logic-explainer">${esc(geminiAnalysis?.reviewSentiment || "—")}</div>
-    </details>
-  `;
-
-  if (topCompetitor?.name) {
-    html += `
-      <div class="row">
-        <strong>Top Competitor:</strong> ${esc(topCompetitor.name)}
-        ${topCompetitor.website ? `&nbsp;— <a href="${esc(topCompetitor.website)}" target="_blank" rel="noopener">website</a>` : ""}
-      </div>`;
-  }
-
-  if (mapEmbedUrl) {
-    html += `
-      <div class="map-container">
-        <iframe src="${esc(mapEmbedUrl)}" loading="lazy" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe>
-      </div>`;
-  }
-
-  html += renderClarifications(clarifications);
-  results.innerHTML = html;
-  wireClarificationButtons(clarifications);
+// ---------- Analyze flow ----------
+function resetScoresUI() {
+  overallPct.textContent = '—'; updateBar(overallBar, 0);
+  labels.forEach(({ bar, txt }) => { txt.textContent = '—'; updateBar(bar, 0); });
+  nextStep.textContent = '—'; adThemes.textContent = '—'; revSent.textContent = '—';
+  mapFrame.src = '';
 }
 
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  formError.style.display = "none";
-  results.innerHTML = "";
+function readBizType() {
+  return document.querySelector('input[name="biztype"]:checked')?.value || 'contractor';
+}
 
-  const businessName = document.getElementById("businessName").value.trim();
-  const websiteUrl = normalizeWebsite(document.getElementById("websiteUrl").value);
-  const serviceArea = document.getElementById("serviceArea").value.trim();
-  const businessType = [...document.querySelectorAll('input[name="businessType"]')].find(i => i.checked)?.value;
+function getScoreValue(data, camelKey, labelKey) {
+  // Prefer camelCase if server sent detailedScoresCamel; else fall back to label map.
+  const camel = data.detailedScoresCamel || {};
+  const label = data.detailedScores || {};
+  if (camelKey in camel) return camel[camelKey];
+  if (labelKey in label) return label[labelKey];
+  return 0;
+}
 
-  if (!businessName || !websiteUrl || !businessType) {
-    formError.textContent = "Please complete all required fields.";
-    formError.style.display = "block";
-    return;
-  }
-
-  analyzeButton.disabled = true;
-  analyzeButton.textContent = "Analyzing…";
-
-  const selectedPlaceId = window.__forcePlaceId || null; // carry any selection
-  window.__forcePlaceId = null; // reset after reading
-
+async function analyze(extra = {}) {
+  resetScoresUI(); setBusy(true);
   try {
-    const qs = fastMode.checked ? "?quick=1" : "";
-    const body = { businessName, websiteUrl, businessType, serviceArea };
-    if (selectedPlaceId) body.placeId = selectedPlaceId;
+    const payload = {
+      businessName: bName.value.trim(),
+      websiteUrl:   webUrl.value.trim(),
+      serviceArea:  area.value.trim(),
+      businessType: readBizType(),
+      fast: !!fast.checked,
+      useGemini: true,
+      ...extra,
+    };
 
-    const res = await fetch(`${API_PATH}${qs}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
+    const data = await post('/api/analyze', payload);
+    console.log('analyze response', data);
 
-    const data = await res.json().catch(() => ({}));
-
-    if (!res.ok || !data?.success) {
-      const clar = Array.isArray(data?.clarifications) ? data.clarifications : [];
-      if (clar.length) {
-        results.innerHTML = renderClarifications(clar);
-        wireClarificationButtons(clar);
-        // Don’t surface the throw to the user if we showed actionable choices
-        if (!data?.message && !data?.error) return;
-        throw new Error(data?.message || data?.error || "Try one of the suggestions above.");
-      }
-      throw new Error(data?.message || data?.error || "Analysis failed.");
+    if (!data?.success) {
+      overallPct.textContent = 'Error'; return;
     }
 
-    renderResult(data);
-  } catch (err) {
-    console.error(err);
-    formError.textContent = err.message || "Something went wrong.";
-    formError.style.display = "block";
+    LAST_PLACE_ID = data.placeId || LAST_PLACE_ID || null;
+
+    // Overall
+    const final = clamp(Number(data.finalScore) || 0);
+    overallPct.textContent = final + '%';
+    updateBar(overallBar, final);
+
+    // Metrics
+    for (const { bar, txt, key } of labels) {
+      const v = clamp(Number(getScoreValue(data, key[0], key[1])) || 0);
+      txt.textContent = v + '%';
+      updateBar(bar, v);
+    }
+
+    // AI bits
+    nextStep.textContent = data?.geminiAnalysis?.topPriority || '—';
+    adThemes.textContent = data?.geminiAnalysis?.competitorAdAnalysis || 'Use competitor cards below to view official ad libraries.';
+    revSent.textContent  = data?.geminiAnalysis?.reviewSentiment || '—';
+
+    // Map
+    if (data?.mapEmbedUrl) mapFrame.src = data.mapEmbedUrl;
   } finally {
-    analyzeButton.disabled = false;
-    analyzeButton.textContent = "Analyze My Business";
+    setBusy(false);
   }
+}
+
+document.getElementById('analyzeBtn').addEventListener('click', () => analyze());
+
+// ---------- Competitors ----------
+function compCard(c) {
+  const rating = (typeof c.rating === 'number' && c.rating >= 0) ? c.rating.toFixed(1) : '—';
+  return `
+  <div class="card">
+    ${c.photoUrl ? `<img class="thumb" src="${c.photoUrl}" alt="${c.name}">` : ''}
+    <div style="margin-top:10px;">
+      <div style="font-weight:700">${c.name}</div>
+      <div class="muted">${c.address || ''}</div>
+      <div class="row-compact">⭐ ${rating} · ${c.reviews ?? 0} reviews</div>
+      ${Array.isArray(c.inferredThemes) && c.inferredThemes.length ? `<div class="row-compact"><strong>Themes:</strong> ${c.inferredThemes.join(', ')}</div>` : ''}
+      ${Array.isArray(c.counters) && c.counters.length ? `<div class="row-compact"><strong>Counter-angles:</strong> ${c.counters.join('; ')}</div>` : ''}
+      ${c.reviewSentiment ? `<div class="row-compact"><strong>Reviews:</strong> ${c.reviewSentiment}</div>` : ''}
+      <div class="inline" style="margin-top:8px; flex-wrap: wrap; gap:8px;">
+        <a class="btn-link" href="${c.links.googleAdsTransparency}" target="_blank" rel="noopener">Google Ads</a>
+        <a class="btn-link" href="${c.links.metaAdLibrary}" target="_blank" rel="noopener">Meta Ads</a>
+        <a class="btn-link" href="${c.links.googleMaps}" target="_blank" rel="noopener">Maps</a>
+        ${c.website ? `<a class="btn-link" href="${c.website}" target="_blank" rel="noopener">Website</a>` : ''}
+      </div>
+    </div>
+  </div>`;
+}
+
+async function fetchCompetitors() {
+  competitorsBox.innerHTML = '<div class="muted">Finding nearby competitors…</div>';
+  setBusy(true);
+  try {
+    const body = {
+      placeId: LAST_PLACE_ID || undefined,
+      businessType: readBizType(),
+      serviceArea: area.value.trim(),
+      useGemini: false  // keep ToS-safe; enable if you add robots-aware site/review text later
+    };
+    const json = await post('/api/competitive-snapshot', body);
+    console.log('competitive-snapshot', json);
+
+    if (!json?.success) {
+      competitorsBox.innerHTML = '<div class="muted">Could not load competitors.</div>';
+      return;
+    }
+    if (!Array.isArray(json.competitors) || !json.competitors.length) {
+      competitorsBox.innerHTML = '<div class="muted">No competitors found for this area.</div>';
+      return;
+    }
+    competitorsBox.innerHTML = json.competitors.map(compCard).join('');
+  } finally {
+    setBusy(false);
+  }
+}
+showCompetitorsBtn.addEventListener('click', fetchCompetitors);
+
+// ---------- Optional: auto-bias competitor search after analyze ----------
+window.addEventListener('load', () => {
+  // For demos you could auto-run analyze() here.
 });
