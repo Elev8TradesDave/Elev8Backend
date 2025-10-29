@@ -22,8 +22,8 @@ const ENABLE_AD_SCRAPE = /^true$/i.test(process.env.ENABLE_AD_SCRAPE || "false")
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
 // Keys (SPLIT)
-const MAPS_SERVER = process.env.GOOGLE_MAPS_API_KEY || "";        // server: Places, Geocoding
-const MAPS_EMBED  = process.env.GOOGLE_MAPS_EMBED_KEY || "";      // browser: Maps Embed (referrer-restricted)
+const MAPS_SERVER = process.env.GOOGLE_MAPS_API_KEY || "";   // server: Places, Geocoding
+const MAPS_EMBED  = process.env.GOOGLE_MAPS_EMBED_KEY || ""; // browser: Maps Embed (referrer-restricted)
 
 // ---------- APP ----------
 const app = express();
@@ -111,7 +111,7 @@ function requireEnv(keys, res) {
   const missing = keys.filter((k) => !process.env[k]);
   if (missing.length) {
     console.error("Missing env:", missing.join(", "));
-    res.status(500).json({ error: `Server configuration missing: ${missing.join(", ")}` });
+    res.status(500).json({ success: false, error: `Server configuration missing: ${missing.join(", ")}` });
     return true;
   }
   return false;
@@ -186,12 +186,10 @@ async function resolvePlaceCandidates({ businessName, serviceArea }) {
     const params = {
       input,
       inputtype: "textquery",
-      // IMPORTANT: 'website' is NOT supported here
       fields: ["place_id", "name", "formatted_address"],
       region: "us",
       key: MAPS_SERVER
     };
-    // REST format: "circle:5000@lat,lng"
     if (bias) params.locationbias = `circle:5000@${bias.lat},${bias.lng}`;
 
     const { data } = await mapsClient.findPlaceFromText({ params, timeout: 5000 });
@@ -231,7 +229,6 @@ async function fetchPlaceDetails(placeId) {
 }
 
 function pickBestCandidateByWebsite(candidates, websiteUrl) {
-  // Most FindPlace/TextSearch candidates won't include website; we'll still prefer the first.
   if (!candidates?.length) return null;
   if (!websiteUrl) return candidates[0];
 
@@ -243,7 +240,6 @@ function pickBestCandidateByWebsite(candidates, websiteUrl) {
   }
   if (!targetHost) return candidates[0];
 
-  // If any candidate has website (e.g., from TextSearch or later augmentation), try to match.
   const exact = candidates.find((c) => c.website && normalizeHost(c.website) === targetHost);
   if (exact) return exact;
 
@@ -259,7 +255,7 @@ async function getBrowser() {
       .launch({
         args: chromium.args,
         defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath(), // works on Render
+        executablePath: await chromium.executablePath(),
         headless: chromium.headless
       })
       .catch((err) => {
@@ -302,7 +298,7 @@ async function scrapeGoogleAds(domain) {
 // ---------- REVERSE GEOCODE ----------
 const reverseHandler = async (req, res) => {
   const { lat, lon } = req.query;
-  if (!lat || !lon) return res.status(400).json({ error: "Latitude and longitude are required." });
+  if (!lat || !lon) return res.status(400).json({ success:false, error: "Latitude and longitude are required." });
 
   if (requireEnv(["GOOGLE_MAPS_API_KEY"], res)) return;
 
@@ -317,17 +313,17 @@ const reverseHandler = async (req, res) => {
     });
 
     const result = (data.results || [])[0];
-    if (!result) return res.status(404).json({ error: "Could not find city for coordinates." });
+    if (!result) return res.status(404).json({ success:false, error: "Could not find city for coordinates." });
 
     let city = "", state = "";
     for (const c of result.address_components) {
       if (c.types.includes("locality")) city = c.long_name;
       if (c.types.includes("administrative_area_level_1")) state = c.short_name;
     }
-    return res.json({ cityState: [city, state].filter(Boolean).join(", ") });
+    return res.json({ success:true, cityState: [city, state].filter(Boolean).join(", ") });
   } catch (e) {
     console.error("Reverse geocode error:", errPayload(e));
-    return res.status(500).json({ error: "Failed to reverse geocode." });
+    return res.status(500).json({ success:false, error: "Failed to reverse geocode." });
   }
 };
 
@@ -339,14 +335,23 @@ const analyzeHandler = async (req, res) => {
   const start = Date.now();
   const { businessName, websiteUrl, businessType, serviceArea } = req.body || {};
 
-  // QUICK MODE: fast smoke test (no external calls)
-  const quickMode =
-    req.query.quick === "1" || req.headers["x-quick"] === "1" || req.headers["x-skip-external"] === "1";
+  // Quick mode: now ONLY via query param ?quick=1 (no header triggers)
+  const quickMode = req.query.quick === "1";
+
+  console.log('[ANALYZE] start', {
+    quickMode,
+    bodyPresent: !!req.body,
+    path: req.path,
+    businessName,
+    serviceArea,
+    businessType
+  });
 
   if (quickMode) {
     const effectiveServiceArea = (serviceArea || "").toString().trim();
     const q = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName;
 
+    console.log('[ANALYZE] Quick mode forced via query param.');
     return res.status(200).json({
       success: true,
       finalScore: 70,
@@ -373,7 +378,6 @@ const analyzeHandler = async (req, res) => {
   if (!businessName || !websiteUrl || !businessType) {
     return res.status(400).json({ success: false, message: "Please complete all required fields." });
   }
-  // Accept bare domains by normalizing to https://
   const normalizedWebsite = isHttpUrl(websiteUrl)
     ? websiteUrl
     : `https://${websiteUrl.replace(/^\/*/, "")}`;
@@ -384,7 +388,6 @@ const analyzeHandler = async (req, res) => {
     return res.status(400).json({ success: false, message: "Invalid businessType" });
   }
 
-  // Full mode requires Maps; Gemini is optional
   if (requireEnv(["GOOGLE_MAPS_API_KEY"], res)) return;
 
   const effectiveServiceArea = (serviceArea || "").toString().trim();
@@ -394,27 +397,8 @@ const analyzeHandler = async (req, res) => {
     const candidates = await resolvePlaceCandidates({ businessName, serviceArea: effectiveServiceArea });
 
     if (!candidates.length) {
-      const q = effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : businessName;
-      return res.status(200).json({
-        success: true,
-        finalScore: 70,
-        detailedScores: {
-          "Overall Rating": 60,
-          "Review Volume": 40,
-          "Pain Point Resonance": 50,
-          "Call-to-Action Strength": 50,
-          "Website Health": 50,
-          "On-Page SEO": 50
-        },
-        geminiAnalysis: {
-          scores: {},
-          topPriority: "Add your primary town and trade into the H1 and title tag.",
-          competitorAdAnalysis: "No competitor detected for this query.",
-          reviewSentiment: "Not enough public reviews to summarize."
-        },
-        topCompetitor: null,
-        mapEmbedUrl: buildMapEmbedUrl(q)
-      });
+      console.log('[ANALYZE] No candidates found for', businessName, serviceArea);
+      return res.status(404).json({ success:false, error:"No Google Business Profile found for this query." });
     }
 
     const picked = pickBestCandidateByWebsite(candidates, normalizedWebsite);
@@ -470,20 +454,20 @@ Return ONLY JSON:
   "reviewSentiment": "<biggest positive theme>"
 }`.trim();
 
-      const gen = await withTimeout(
-        model.generateContent({
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          generationConfig: { maxOutputTokens: 1024 }
-        }),
-        7000,
-        "Gemini timeout"
-      );
       try {
-        const raw = gen.response.text() || "";
+        const gen = await withTimeout(
+          model.generateContent({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: { maxOutputTokens: 1024 }
+          }),
+          7000,
+          "Gemini timeout"
+        );
+        const raw = gen?.response?.text() || "";
         const match = raw.match(/{[\s\S]*}/);
         if (match) geminiAnalysis = JSON.parse(match[0]);
       } catch (e) {
-        console.warn("Gemini parse failed:", e.message);
+        console.warn("Gemini step skipped:", e.message);
       }
     }
 
@@ -493,11 +477,10 @@ Return ONLY JSON:
       businessType
     );
 
-    console.log(`Analyze done in ${Date.now() - start}ms for "${businessName}"`, {
-      placeId: picked?.place_id,
-      rating: googleData.rating,
-      reviews: googleData.reviewCount
-    });
+    console.log(
+      `[ANALYZE] done in ${Date.now() - start}ms`,
+      { placeId: picked?.place_id, rating: googleData.rating, reviews: googleData.reviewCount, finalScore }
+    );
 
     return res.status(200).json({
       success: true,
@@ -508,28 +491,10 @@ Return ONLY JSON:
       mapEmbedUrl
     });
   } catch (error) {
-    console.error("[analyze] FAIL", errPayload(error));
-    const q =
-      effectiveServiceArea ? `${businessName} ${effectiveServiceArea}` : (businessName || "Unknown");
-    return res.status(200).json({
-      success: true,
-      finalScore: 70,
-      detailedScores: {
-        "Overall Rating": 60,
-        "Review Volume": 40,
-        "Pain Point Resonance": 50,
-        "Call-to-Action Strength": 50,
-        "Website Health": 50,
-        "On-Page SEO": 50
-      },
-      geminiAnalysis: {
-        scores: {},
-        topPriority: "Add your primary town and trade into the H1 and title tag.",
-        competitorAdAnalysis: "LLM unavailable or timed out.",
-        reviewSentiment: "Not enough public reviews to summarize."
-      },
-      topCompetitor: null,
-      mapEmbedUrl: buildMapEmbedUrl(q)
+    console.error("[ANALYZE] FAIL", errPayload(error));
+    return res.status(500).json({
+      success: false,
+      error: error?.message || "Analyze failed"
     });
   }
 };
@@ -539,9 +504,12 @@ app.post("/analyze", analyzeHandler);
 
 // ---------- SCORING ----------
 function calculateFinalScore(googleData, geminiScores, businessType) {
-  // Core signals from Google
+  // Core signals
   const ratingScore = clampPct((Number(googleData.rating || 0) / 5) * 100);
-  const reviewScore = clampPct(Math.min(Number(googleData.reviewCount || 0) / 150, 1) * 100);
+
+  // Log curve for review volume: 1→0, 10→~25, 100→~50, 1k→~75, 10k→~100
+  const rc = Number(googleData.reviewCount || 0);
+  const reviewScore = clampPct(Math.log10(Math.max(rc, 1)) * 25);
 
   const hasGemini =
     geminiScores &&
@@ -553,12 +521,12 @@ function calculateFinalScore(googleData, geminiScores, businessType) {
   const websiteHealth      = hasGemini ? clampPct(geminiScores.websiteHealth)      : null;
   const onPageSEO          = hasGemini ? clampPct(geminiScores.onPageSEO)          : null;
 
-  // Baseline weights when all metrics present
+  // Weights tuned so reviews matter more and rating has strong influence.
   const fullWeights = (businessType === "maintenance")
-    ? { rating: 0.15, review: 0.15, pain: 0.05, cta: 0.25, web: 0.15, seo: 0.15 }
-    : { rating: 0.20, review: 0.15, pain: 0.20, cta: 0.05, web: 0.15, seo: 0.15 };
+    ? { rating: 0.20, review: 0.25, pain: 0.10, cta: 0.15, web: 0.15, seo: 0.15 }
+    : { rating: 0.25, review: 0.25, pain: 0.20, cta: 0.10, web: 0.10, seo: 0.10 };
 
-  // Use only available metrics; renormalize weights to 1
+  // Use only available metrics; renormalize to 1
   const metrics = [
     { key: "rating", val: ratingScore,        w: fullWeights.rating },
     { key: "review", val: reviewScore,        w: fullWeights.review },
