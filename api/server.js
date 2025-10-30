@@ -25,7 +25,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { Client } = require('@googlemaps/google-maps-services-js');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const path = require('path'); // <-- needed for static serving
+const path = require('path'); // <-- static serving
 
 const PORT = process.env.PORT || 10000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -35,6 +35,7 @@ const IS_PROD = NODE_ENV === 'production';
 const GOOGLE_MAPS_API_KEY_SERVER = process.env.GOOGLE_MAPS_API_KEY_SERVER || '';
 const GOOGLE_MAPS_EMBED_API_KEY  = process.env.GOOGLE_MAPS_EMBED_API_KEY || '';
 const GEMINI_API_KEY             = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL_ENV           = (process.env.GEMINI_MODEL || '').trim();
 
 // Scraping flags intentionally disabled (we are NOT scraping)
 const ENABLE_AD_SCRAPE = false;
@@ -196,11 +197,35 @@ async function resolvePlaceId({ placeId, businessName, websiteUrl, serviceArea }
 }
 
 // ---------- Gemini (optional; no scraping) ----------
-async function runGeminiAnalysis({ homepageText, reviewSnippets, timeoutMs = 12000 }) {
+/**
+ * Try several model names to avoid "model not found" errors.
+ * Order: env override -> gemini-flash-latest -> gemini-2.5-flash -> gemini-2.0-flash-001
+ */
+async function getGeminiModel() {
   if (!GEMINI_API_KEY) return null;
-
   const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+  const candidates = [GEMINI_MODEL_ENV, 'gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash-001']
+    .filter(Boolean);
+
+  for (const name of candidates) {
+    try {
+      const model = genAI.getGenerativeModel({ model: name });
+      // quick ping to verify model availability
+      await model.generateContent({ contents: [{ role: 'user', parts: [{ text: 'ping' }]}] });
+      console.log('[gemini] using model:', name);
+      return model;
+    } catch (e) {
+      const msg = String(e);
+      console.warn('[gemini] model failed:', name, msg.slice(0, 140));
+    }
+  }
+  console.warn('[gemini] no available model; disabling Gemini step');
+  return null;
+}
+
+async function runGeminiAnalysis({ homepageText, reviewSnippets, timeoutMs = 12000 }) {
+  const model = await getGeminiModel();
+  if (!model) return null;
 
   const prompt = `
 You are a local SEO analyzer. Using ONLY the website copy and reviews provided,
@@ -246,8 +271,9 @@ ${(reviewSnippets || '').slice(0, 3000)}
     } catch {
       return { scores: {}, topPriority: '', reviewSentiment: '' };
     }
-  } catch {
+  } catch (e) {
     clearTimeout(to);
+    console.warn('[gemini] generateContent failed:', String(e).slice(0, 160));
     return null;
   }
 }
