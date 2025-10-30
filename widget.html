@@ -1,110 +1,128 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"/>
+  <meta charset="UTF-8" />
   <title>Elev8Trades — Local Visibility Audit</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root{color-scheme:light dark;}
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#0b0c0f;color:#e8f0ec;margin:0}
-    .wrap{max-width:1100px;margin:24px auto;padding:0 18px}
-    h1{font-size:28px;margin:0 0 8px}
-    .card{background:#121418;border:1px solid #1c2126;border-radius:16px;padding:16px;margin:16px 0}
-    .row{display:grid;gap:8px;margin:10px 0}
-    .row>input,.row>select{background:#0f1216;border:1px solid #1c2126;border-radius:10px;color:#e8f0ec;padding:10px}
-    .controls{display:flex;gap:12px;align-items:center;margin:8px 0}
-    button{padding:10px 14px;border:0;border-radius:12px;background:#3DFF6C;color:#0b0c0f;font-weight:800;cursor:pointer}
-    .grid{display:grid;gap:14px}
-    .grid.cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
-    .scores{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-    .meter{height:10px;background:#0f1216;border:1px solid #1c2126;border-radius:999px;overflow:hidden}
-    .meter>span{display:block;height:100%;background:#3DFF6C;width:0%}
-    .pill{display:inline-flex;gap:6px;align-items:center;background:#0f1216;border:1px solid #1c2126;border-radius:999px;padding:6px 10px;font-size:12px;color:#a9b3ad}
-    .competitors{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
-    .comp-card{background:#0f1216;border:1px solid #1c2126;border-radius:12px;overflow:hidden}
-    .comp-card img{width:100%;height:160px;object-fit:cover;display:block;background:#0d0f12}
-    .comp-body{padding:12px}
-    .links{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
-    .link-btn{font-size:12px;padding:6px 8px;border-radius:8px;background:#121418;border:1px solid #1c2126;color:#e8f0ec;text-decoration:none}
-    @media (max-width:860px){.grid.cols-3{grid-template-columns:1fr}}
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin: 20px; line-height: 1.45; }
+    .form { max-width: 860px; margin: 0 auto; }
+    .row { margin: 12px 0; display: grid; gap: 6px; }
+    .controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    label { font-weight: 600; }
+    input, select { padding: 8px 10px; border-radius: 8px; border: 1px solid #d1d5db; min-width: 260px; }
+    button { padding: 10px 14px; border: 0; border-radius: 10px; background: #111827; color: white; cursor: pointer; }
+    .out { max-width: 860px; margin: 18px auto; display: grid; gap: 10px; }
+    .bar { height: 10px; background: #e5e7eb; border-radius: 6px; overflow: hidden; }
+    .fill { height: 100%; width: 0%; background: #10b981; transition: width .4s ease; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 10px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px 12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    iframe { width: 100%; height: 300px; border: 0; border-radius: 12px; }
+    .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; background:#e5e7eb; display:inline-block; }
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <div class="form">
     <h1>Elev8Trades — Local Visibility Audit</h1>
-    <p>Resolve your business on Google, score your presence, and see <b>trade-specific</b> competitors.</p>
 
-    <div class="card">
-      <div class="grid cols-3">
-        <label class="row">Business Name*<input id="bName" placeholder="All State Home Improvement Inc." required></label>
-        <label class="row">Website URL<input id="webUrl" placeholder="https://yourdomain.com"></label>
-        <label class="row">Primary Service Area (City/County/Region)<input id="area" placeholder="Hillside, New Jersey"></label>
+    <div class="row">
+      <label for="bName">Business name</label>
+      <input id="bName" placeholder="e.g., All State Home Improvement Inc." />
+    </div>
 
-        <label class="row">Trade*
-          <select id="tradeSelect" required>
-            <option value="">Select your trade…</option>
-            <option value="roofing">Roofing</option>
-            <option value="siding">Siding</option>
-            <option value="roofing_siding">Roofing & Siding</option>
-            <option value="hvac">HVAC</option>
-            <option value="plumbing">Plumbing</option>
-            <option value="electrical">Electrical</option>
-            <option value="landscaping">Landscaping</option>
-            <option value="masonry">Masonry</option>
-            <option value="concrete">Concrete</option>
-            <option value="general">General Contractor</option>
-            <option value="solar">Solar</option>
-            <option value="garage_doors">Garage Doors</option>
-            <option value="fencing">Fencing</option>
-            <option value="paving">Paving / Asphalt</option>
-            <option value="windows">Windows & Doors</option>
-            <option value="painting">Painting</option>
+    <div class="row">
+      <label for="webUrl">Website (optional)</label>
+      <input id="webUrl" placeholder="e.g., www.example.com" />
+    </div>
+
+    <div class="row">
+      <div class="controls">
+        <div>
+          <label for="area">City/Area</label><br />
+          <input id="area" placeholder="e.g., New Jersey" />
+        </div>
+        <div>
+          <label for="tradeSelect">Trade</label><br />
+          <select id="tradeSelect">
+            <option value="">Other</option>
+            <option>Roofing</option>
+            <option>Plumbing</option>
+            <option>HVAC (Repair)</option>
+            <option>HVAC (Install)</option>
+            <option>Electrical</option>
+            <option>Landscaping</option>
+            <option>Masonry</option>
           </select>
-        </label>
-
-        <div class="row">
-          <div class="controls">
-            <label><input type="checkbox" id="fast"> Fast test mode</label>
-            <button id="btnAnalyze">Analyze My Business</button>
-            <button id="btnCompetitors" title="Fetch nearby competitors for your trade">See Competitors</button>
-          </div>
+        </div>
+        <div>
+          <label><input type="checkbox" id="fast" /> Fast test mode (skip site fetch)</label>
         </div>
       </div>
+    </div>
 
-      <div class="scores" style="margin-top:12px">
-        <div class="card">
-          <div class="pill">Overall Score</div>
-          <div id="overallPct" style="font-size:32px;font-weight:900;margin:6px 0">—</div>
-          <div class="meter"><span id="overallBar"></span></div>
-        </div>
-        <div class="card">
-          <div class="pill">Signals</div>
-          <div class="grid">
-            <div>Overall Rating: <b id="s_overall">—</b></div>
-            <div>Review Volume: <b id="s_reviews">—</b></div>
-            <div>Pain Point Resonance: <b id="s_pain">—</b></div>
-            <div>CTA Strength: <b id="s_cta">—</b></div>
-            <div>Website Health: <b id="s_web">—</b></div>
-            <div>On-Page SEO: <b id="s_onpage">—</b></div>
-          </div>
-        </div>
-      </div>
-
-      <div id="mapEmbedWrap" class="card" style="display:none">
-        <div class="pill">Map Preview</div>
-        <iframe id="mapEmbed" style="width:100%;height:320px;border:0;border-radius:12px;margin-top:8px" loading="lazy"></iframe>
-      </div>
-
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center">
-          <div class="pill">Competitors Near You</div>
-          <button id="btnTop" style="background:#121418;color:#e8f0ec;border:1px solid #1c2126">See Top Competitors Nearby</button>
-        </div>
-        <div id="competitorsBox" class="competitors" style="margin-top:12px"></div>
-      </div>
+    <div class="row controls">
+      <button id="btnAnalyze">Analyze</button>
+      <button id="btnCompetitors">Competitors</button>
+      <button id="btnTop">Top</button>
     </div>
   </div>
 
-  <script src="/widget.js"></script>
+  <div class="out">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <strong>Overall</strong>
+        <span class="badge mono" id="modeBadge">—</span>
+      </div>
+      <div class="bar"><div class="fill" id="overallBar"></div></div>
+      <div class="mono" id="overallPct">—</div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <strong>SEO</strong>
+        <div class="bar"><div class="fill" id="barSeo"></div></div>
+        <div class="mono" id="valSeo">—</div>
+      </div>
+      <div class="card">
+        <strong>CTA</strong>
+        <div class="bar"><div class="fill" id="barCta"></div></div>
+        <div class="mono" id="valCta">—</div>
+      </div>
+      <div class="card">
+        <strong>GBP (Reviews)</strong>
+        <div class="bar"><div class="fill" id="barGbp"></div></div>
+        <div class="mono" id="valGbp">—</div>
+      </div>
+      <div class="card">
+        <strong>Reviews Dial</strong>
+        <div class="bar"><div class="fill" id="barReviews"></div></div>
+        <div class="mono" id="valReviews">—</div>
+      </div>
+      <div class="card">
+        <strong>Pain Dial</strong>
+        <div class="bar"><div class="fill" id="barPain"></div></div>
+        <div class="mono" id="valPain">—</div>
+      </div>
+    </div>
+
+    <div class="card" id="mapEmbedWrap" style="display:none;">
+      <strong>Map Preview</strong>
+      <iframe id="mapEmbed" loading="lazy"></iframe>
+    </div>
+
+    <div class="card">
+      <strong>Details</strong>
+      <pre class="mono" id="details" style="white-space:pre-wrap;"></pre>
+    </div>
+
+    <div class="card">
+      <strong>Competitors</strong>
+      <pre class="mono" id="competitors" style="white-space:pre-wrap;"></pre>
+    </div>
+  </div>
+
+  <script src="./widget.js"></script>
 </body>
 </html>

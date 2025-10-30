@@ -1,497 +1,541 @@
 /**
- * Elev8Trades Backend (Render-friendly, IPv6-safe)
+ * Elev8Trades Backend — Local Visibility Audit
+ * Adaptive, trade-aware SEO/CTA/GBP scoring (Render-friendly)
  * File: api/server.js
  *
- * Endpoints:
- * - GET  /api/health
- * - POST /api/analyze
- * - POST /api/competitive-snapshot
- *
- * Notes:
- * - Uses Google Maps Places API (no scraping).
- * - Resolves place by ID or name+area (findPlaceFromText), then enriches with placeDetails.
- * - IMPORTANT: findPlaceFromText does NOT request "website" (unsupported); website is fetched via placeDetails.
+ * ENV (Render dashboard):
+ *   NODE_ENV=production
+ *   GOOGLE_MAPS_API_KEY_SERVER=<server-side places/details/textsearch key>
+ *   GOOGLE_MAPS_EMBED_KEY=<client-safe embed key>
+ *   GEMINI_API_KEY=<optional, not required>
+ *   ENABLE_AD_SCRAPE=false
  */
 
-require('dotenv').config();
+require("dotenv").config();
 
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-const { Client } = require('@googlemaps/google-maps-services-js');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const path = require('path');
-
-// ---------- Config ----------
-const PORT = process.env.PORT || 10000;
-const NODE_ENV = process.env.NODE_ENV || 'development';
-const IS_PROD = NODE_ENV === 'production';
-
-// Env var names (match Render)
-const GOOGLE_MAPS_API_KEY_SERVER = process.env.GOOGLE_MAPS_API_KEY_SERVER || '';
-const GOOGLE_MAPS_EMBED_KEY      = process.env.GOOGLE_MAPS_EMBED_KEY || '';
-const GEMINI_API_KEY             = process.env.GEMINI_API_KEY || '';
-
-// Ad scrape is intentionally disabled
-const ENABLE_AD_SCRAPE = false;
-const ENABLE_AD_SCRAPE_IN_PROD = false;
+const express = require("express");
+const cors = require("cors");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
+const { Client } = require("@googlemaps/google-maps-services-js");
+const cheerio = require("cheerio");
 
 const app = express();
-app.set('trust proxy', 1);
+const PORT = process.env.PORT || 10000;
+const NODE_ENV = process.env.NODE_ENV || "development";
+const GOOGLE_MAPS_API_KEY_SERVER = process.env.GOOGLE_MAPS_API_KEY_SERVER || "";
+const GOOGLE_MAPS_EMBED_KEY = process.env.GOOGLE_MAPS_EMBED_KEY || "";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; // optional
 
-// ---------- Middleware ----------
-app.use(express.json({ limit: '1mb' }));
-app.use(cors({
-  origin: [/^http:\/\/localhost:\d+$/i, /^https:\/\/.*$/i],
-  methods: ['GET','POST','OPTIONS'],
-  credentials: false
-}));
-app.use(helmet({
-  contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false
-}));
-app.use(rateLimit({
-  windowMs: 60 * 1000,
-  max: 60,
-  standardHeaders: true,
-  legacyHeaders: false
-}));
+// ---------- Base Middleware ----------
+app.set("trust proxy", 1);
+app.use(express.json({ limit: "1mb" }));
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        "default-src": ["'self'"],
+        "script-src": ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+        "style-src": ["'self'", "'unsafe-inline'"],
+        "img-src": ["'self'", "data:", "https:", "http:"],
+        "frame-src": ["'self'", "https://www.google.com"],
+      },
+    },
+  })
+);
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      const ok =
+        origin.startsWith("http://localhost") ||
+        origin.startsWith("http://127.0.0.1") ||
+        origin.startsWith("https://");
+      return ok ? cb(null, true) : cb(null, false);
+    },
+  })
+);
+app.use(
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+  })
+);
 
-// Quiet favicon noise in DevTools
-app.get('/favicon.ico', (_req, res) => res.sendStatus(204));
+// ---------- Google Maps ----------
+const gmaps = new Client();
+
+async function mapsCall(fn, args, timeoutMs = 8000) {
+  try {
+    const res = await fn({ timeout: timeoutMs, ...args });
+    return { ok: true, data: res.data };
+  } catch (err) {
+    console.error("Maps error:", err?.response?.data || err.message || err);
+    return { ok: false, error: err?.response?.data || err.message || "Maps error" };
+  }
+}
+
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function normTo100(value, min, max) {
+  if (value == null || Number.isNaN(value)) return 0;
+  const clamped = Math.max(min, Math.min(max, value));
+  return Math.round(((clamped - min) / (max - min)) * 100);
+}
+
+// ---------- GBP (reviews-driven) ----------
+function scoreReviews(avgRating, ratingsTotal) {
+  const ratingScore = normTo100(avgRating || 0, 3.0, 5.0);
+  const volumeScore = normTo100(ratingsTotal || 0, 0, 200);
+  return Math.round(0.75 * ratingScore + 0.25 * volumeScore);
+}
+function scoreGBP(details) {
+  const avg = details?.rating || 0;
+  const total = details?.user_ratings_total || 0;
+  const reviews = scoreReviews(avg, total);
+  const photosCount = (details?.photos || []).length;
+  const photosBoost = Math.min(10, Math.floor(photosCount / 5));
+  return clamp(reviews + photosBoost, 0, 100);
+}
+
+// ---------- Fetch & analyze homepage ----------
+async function fetchHtml(url, timeoutMs = 6000) {
+  try {
+    const u = url.startsWith("http") ? url : `https://${url}`;
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(u, { signal: controller.signal, redirect: "follow" });
+    clearTimeout(t);
+    if (!res.ok) return { html: null, contentType: res.headers.get("content-type") || "" };
+    const ct = res.headers.get("content-type") || "";
+    const html = await res.text();
+    return { html, contentType: ct };
+  } catch {
+    return { html: null, contentType: "" };
+  }
+}
+
+// ---------- CTA scoring (rubric) ----------
+function scoreCTA({ $, placePhone, placeHours }) {
+  let pts = 0;
+  const breakdown = { directCall: 0, contactPaths: 0, hoursPhone: 0, availability: 0 };
+
+  // Direct call
+  const telCount = $('a[href^="tel:"]').length;
+  if (telCount >= 1) {
+    pts += 25;
+    breakdown.directCall += 25;
+  }
+  if (telCount >= 2) {
+    const add = Math.min(5, (telCount - 1) * 2.5);
+    pts += add;
+    breakdown.directCall += add;
+  }
+
+  // Contact paths
+  const CTA_WORDS = ["call", "quote", "estimate", "book", "schedule", "contact", "get started", "free estimate"];
+  const ctaNodes = $("a,button").filter((_, el) => {
+    const t = $(el).text().toLowerCase().trim();
+    return CTA_WORDS.some((w) => t.includes(w));
+  }).length;
+  if (ctaNodes >= 1) {
+    pts += 15;
+    breakdown.contactPaths += 15;
+  }
+  const extraCta = Math.min(10, Math.max(0, (ctaNodes - 1) * 5));
+  pts += extraCta;
+  breakdown.contactPaths += extraCta;
+
+  const forms = $("form").length;
+  if (forms > 0) {
+    pts += 5;
+    breakdown.contactPaths += 5;
+  }
+
+  // Hours & phone from Place
+  if (placePhone) {
+    pts += 10;
+    breakdown.hoursPhone += 10;
+  }
+  if (placeHours) {
+    pts += 5;
+    breakdown.hoursPhone += 5;
+  }
+
+  // Availability keywords
+  const bodyText = $("body").text().toLowerCase();
+  if (/(24\/7|24-7|same day|emergency)/.test(bodyText)) {
+    pts += 5;
+    breakdown.availability += 5;
+  }
+
+  // Friction
+  if (!placePhone && forms === 0 && ctaNodes === 0) {
+    pts -= 15;
+    breakdown.availability -= 15;
+  }
+
+  return { cta: clamp(pts, 0, 100), ctaBreakdown: breakdown, emergencyHint: /(24\/7|24-7|same day|emergency)/.test(bodyText) };
+}
+
+// ---------- SEO scoring (rubric) ----------
+function scoreSEO($) {
+  let pts = 0;
+  const breakdown = {
+    indexability: 0,
+    titleMeta: 0,
+    headingsContent: 0,
+    internalLinks: 0,
+    localMarkupNap: 0,
+    uxHygiene: 0,
+  };
+
+  // A) Indexability
+  const robots = $('meta[name="robots"]').attr("content")?.toLowerCase() || "";
+  if (robots.includes("noindex")) {
+    pts -= 20;
+    breakdown.indexability -= 20;
+  }
+  if (robots.includes("nofollow")) {
+    pts -= 10;
+    breakdown.indexability -= 10;
+  }
+  if ($('link[rel="canonical"]').attr("href")) {
+    pts += 5;
+    breakdown.indexability += 5;
+  }
+
+  // B) Title & Meta
+  const titleLen = ($("title").first().text() || "").trim().length;
+  if (titleLen >= 20 && titleLen <= 65) {
+    pts += 12;
+    breakdown.titleMeta += 12;
+  } else if ((titleLen >= 1 && titleLen < 20) || (titleLen >= 66 && titleLen <= 80)) {
+    pts += 5;
+    breakdown.titleMeta += 5;
+  } else if (titleLen === 0 || titleLen > 120) {
+    pts -= 10;
+    breakdown.titleMeta -= 10;
+  }
+
+  const md = ($('meta[name="description"]').attr("content") || "").trim().length;
+  if (md >= 120 && md <= 160) {
+    pts += 10; breakdown.titleMeta += 10;
+  } else if ((md >= 60 && md < 120) || (md > 160 && md <= 220)) {
+    pts += 6; breakdown.titleMeta += 6;
+  } else if (md === 0) {
+    pts -= 8; breakdown.titleMeta -= 8;
+  }
+
+  // C) Headings & Content
+  const h1Count = $("h1").length;
+  if (h1Count >= 1) { pts += 8; breakdown.headingsContent += 8; }
+  if (h1Count > 2) { pts -= 6; breakdown.headingsContent -= 6; }
+
+  const text = $("body").text().replace(/\s+/g, " ");
+  const wc = text.split(" ").filter(Boolean).length;
+  if (wc >= 600) { pts += 10; breakdown.headingsContent += 10; }
+  else if (wc >= 300) { pts += 6; breakdown.headingsContent += 6; }
+  else if (wc >= 100) { pts += 3; breakdown.headingsContent += 3; }
+  else { pts -= 4; breakdown.headingsContent -= 4; }
+
+  // D) Internal links
+  const internalLinks = $('a[href^="/"], a[href^="./"], a[href^="../"]').length;
+  if (internalLinks >= 40) { pts += 12; breakdown.internalLinks += 12; }
+  else if (internalLinks >= 15) { pts += 8; breakdown.internalLinks += 8; }
+  else if (internalLinks >= 5) { pts += 4; breakdown.internalLinks += 4; }
+  else if (internalLinks >= 1) { pts += 2; breakdown.internalLinks += 2; }
+
+  const navLinks = $("nav a").length;
+  if (navLinks >= 3) { pts += 3; breakdown.internalLinks += 3; }
+
+  // E) Local SEO & NAP
+  let hasLocal = false;
+  $('script[type="application/ld+json"]').each((_, el) => {
+    try {
+      const j = JSON.parse($(el).contents().text());
+      const arr = Array.isArray(j) ? j : [j];
+      if (arr.some((x) => /LocalBusiness|Organization/i.test(x["@type"] || ""))) hasLocal = true;
+    } catch {}
+  });
+  if (hasLocal) { pts += 10; breakdown.localMarkupNap += 10; }
+
+  const hasMapIframe = $('iframe[src*="google.com/maps"], iframe[src*="maps.google."]').length > 0;
+  if (hasMapIframe) { pts += 5; breakdown.localMarkupNap += 5; }
+
+  const hasPhoneText = /\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/.test(text);
+  const hasAddressText = /\d{1,5}\s+\w+(\s\w+){0,4}\s+(ave|avenue|st|street|rd|road|blvd|boulevard|dr|drive)/i.test(text);
+  if (hasPhoneText && hasAddressText) { pts += 10; breakdown.localMarkupNap += 10; }
+
+  // F) UX/Crawl Hygiene
+  const htmlStr = $.root().html() || "";
+  const scriptLen = $("script").text().length + $("style").text().length;
+  const ratio = scriptLen / Math.max(1, htmlStr.length);
+  if (ratio > 0.6) { pts -= 6; breakdown.uxHygiene -= 6; }
+
+  const imgs = $("img").slice(0, 20);
+  const withAlt = imgs.filter((_, img) => !!$(img).attr("alt")).length;
+  if (imgs.length >= 5 && withAlt / imgs.length >= 0.6) { pts += 3; breakdown.uxHygiene += 3; }
+
+  if ($('link[rel="preconnect"], link[rel="preload"]').length > 0) { pts += 3; breakdown.uxHygiene += 3; }
+
+  return { seo: clamp(pts, 0, 100), seoBreakdown: breakdown };
+}
+
+// ---------- Weighting strategy ----------
+const BASE_WEIGHTS = {
+  default: { seo: 0.50, cta: 0.30, gbp: 0.20 },
+  roofing: { seo: 0.45, cta: 0.35, gbp: 0.20 },
+  plumbing: { seo: 0.35, cta: 0.45, gbp: 0.20 },
+  hvacRepair: { seo: 0.35, cta: 0.45, gbp: 0.20 },
+  hvacInstall: { seo: 0.55, cta: 0.25, gbp: 0.20 },
+  emergency: { seo: 0.40, cta: 0.40, gbp: 0.20 }, // generic emergency override
+};
+
+function pickWeights(trade, emergencyMode) {
+  let key = "default";
+  const t = (trade || "").toLowerCase();
+  if (t.includes("roof")) key = "roofing";
+  else if (t.includes("plumb")) key = "plumbing";
+  else if (t.includes("hvac") || t.includes("air") || t.includes("heat")) {
+    key = t.includes("install") ? "hvacInstall" : "hvacRepair";
+  }
+  const base = BASE_WEIGHTS[key] || BASE_WEIGHTS.default;
+  if (emergencyMode) return BASE_WEIGHTS.emergency;
+  return base;
+}
 
 // ---------- Helpers ----------
-const maps = new Client({});
-const clamp01 = x => Math.max(0, Math.min(1, Number(x) || 0));
-const asPct   = x => Math.round(clamp01(x) * 100);
-
-function reviewVolumeToScore(count) {
-  const c = Math.max(0, Number(count) || 0);
-  const k = 0.03, mid = 40, max = 500;
-  const s = 1 / (1 + Math.exp(-k * (c - mid)));
-  return asPct(Math.min(1, s * (1 + c / max)));
+function makeMapEmbedUrl(placeId) {
+  if (!placeId || !GOOGLE_MAPS_EMBED_KEY) return "";
+  const base = "https://www.google.com/maps/embed/v1/place";
+  const q = new URLSearchParams({ key: GOOGLE_MAPS_EMBED_KEY, q: `place_id:${placeId}` });
+  return `${base}?${q.toString()}`;
 }
-
-function toDisplayScores(norm) {
-  return {
-    'Overall Rating': norm.overallRating,
-    'Review Volume': norm.reviewVolume,
-    'Pain Point Resonance': norm.painPointResonance,
-    'Call-to-Action Strength': norm.ctaStrength,
-    'Website Health': norm.websiteHealth,
-    'On-Page SEO': norm.onPageSeo,
-  };
-}
-
-function normalizeDetailedScores(raw = {}, geminiScores = {}) {
-  const pick = (...keys) => { for (const k of keys) if (k in raw && raw[k] != null) return raw[k]; return 0; };
-  let norm = {
-    overallRating:      pick('overallRating', 'Overall Rating'),
-    reviewVolume:       pick('reviewVolume', 'Review Volume'),
-    painPointResonance: pick('painPointResonance', 'Pain Point Resonance'),
-    ctaStrength:        pick('ctaStrength', 'Call-to-Action Strength', 'cta'),
-    websiteHealth:      pick('websiteHealth', 'Website Health'),
-    onPageSeo:          pick('onPageSeo', 'On-Page SEO'),
-  };
-  for (const k of Object.keys(norm)) {
-    const v = Number(norm[k]);
-    norm[k] = (v <= 1 ? asPct(v) : Math.round(v || 0));
-  }
-  const gs = geminiScores || {};
-  const mergeNum = (key, alt) => {
-    const v = gs[key] ?? gs[alt];
-    if (v == null) return;
-    const n = Number(v);
-    if (!Number.isFinite(n)) return;
-    norm[key] = n <= 1 ? asPct(n) : Math.max(0, Math.min(100, Math.round(n)));
-  };
-  mergeNum('painPointResonance', 'pain_point_resonance');
-  mergeNum('ctaStrength', 'cta_strength');
-  mergeNum('websiteHealth', 'website_health');
-  mergeNum('onPageSeo', 'on_page_seo');
-
-  return { norm, display: toDisplayScores(norm) };
-}
-
-function blendedFinalScore(norm) {
-  const gbp  = (norm.overallRating + norm.reviewVolume) / 2;
-  const site = (norm.painPointResonance + norm.ctaStrength + norm.websiteHealth + norm.onPageSeo) / 4;
-  const mix  = 0.4 * gbp + 0.6 * (Number.isNaN(site) ? 0 : site);
-  return Math.round(mix);
-}
-
-function buildMapsEmbedUrl(placeId) {
-  if (!GOOGLE_MAPS_EMBED_KEY || !placeId) return '';
-  const base = 'https://www.google.com/maps/embed/v1/place';
-  return `${base}?key=${encodeURIComponent(GOOGLE_MAPS_EMBED_KEY)}&q=place_id:${encodeURIComponent(placeId)}`;
-}
-
-function normDomain(u) {
-  try {
-    const url = new URL(u.startsWith('http') ? u : `https://${u}`);
-    return url.hostname.replace(/^www\./, '');
-  } catch { return ''; }
-}
-
-// ---------- Place resolution ----------
-async function resolvePlaceId({ placeId, businessName, websiteUrl, serviceArea }) {
-  if (!GOOGLE_MAPS_API_KEY_SERVER) throw new Error('Missing GOOGLE_MAPS_API_KEY_SERVER');
-  if (placeId) return { placeId, candidates: [], clarifications: [] };
-
-  const parts = [];
-  if (businessName) parts.push(businessName);
-  if (serviceArea)  parts.push(serviceArea);
-  const input = parts.join(' ').trim();
-  if (!input) {
-    return { placeId: null, candidates: [], clarifications: [{ type: 'missing', field: 'businessName/serviceArea' }] };
-  }
-
-  // DO NOT request "website" here; it's unsupported and causes 400.
-  const resp = await maps.findPlaceFromText({
-    params: {
-      key: GOOGLE_MAPS_API_KEY_SERVER,
-      input,
-      inputtype: 'textquery',
-      fields: ['place_id', 'name', 'formatted_address'],
-    },
-    timeout: 8000,
-  });
-
-  const results = (resp.data && resp.data.candidates) || [];
-  if (!results.length) {
-    return { placeId: null, candidates: [], clarifications: [{ type: 'no_match', message: 'No matches found. Try adding city/state.' }] };
-  }
-
-  // Try to pick by domain (requires placeDetails below)
-  const inputDomain = websiteUrl ? normDomain(websiteUrl) : '';
-  let chosen = null;
-
-  // If only one, use it
-  if (!chosen && results.length === 1) chosen = results[0];
-
-  // If multiple and we have a site, look each up for website and match domain
-  if (!chosen && inputDomain) {
-    for (const r of results.slice(0, 6)) {
-      const det = await maps.placeDetails({
-        params: { key: GOOGLE_MAPS_API_KEY_SERVER, place_id: r.place_id, fields: ['website'] },
-        timeout: 8000,
-      }).catch(() => ({ data: {} }));
-      const site = det?.data?.result?.website || '';
-      if (site && normDomain(site) === inputDomain) { chosen = r; break; }
-    }
-  }
-
-  if (!chosen) {
-    // Return light candidate list; UI can render a selector if you want later
-    const candidates = await Promise.all(results.slice(0, 6).map(async r => {
-      const det = await maps.placeDetails({
-        params: { key: GOOGLE_MAPS_API_KEY_SERVER, place_id: r.place_id, fields: ['website'] },
-        timeout: 8000,
-      }).catch(() => ({ data: {} }));
-      return {
-        name: r.name,
-        address: r.formatted_address,
-        placeId: r.place_id,
-        website: det?.data?.result?.website || '',
-      };
-    }));
-    return { placeId: null, candidates, clarifications: [{ type: 'multiple', message: 'Multiple matches found. Select one.' }] };
-  }
-
-  return { placeId: chosen.place_id, candidates: [], clarifications: [] };
-}
-
-// ---------- Gemini (optional; no scraping here) ----------
-async function runGeminiAnalysis({ homepageText, reviewSnippets, timeoutMs = 12000 }) {
-  if (!GEMINI_API_KEY) return null;
-  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-
-  const prompt = `
-Return JSON only with numeric (0–100) scores and short notes.
-
-{"scores":{"painPointResonance":0,"ctaStrength":0,"websiteHealth":0,"onPageSeo":0},"topPriority":"","reviewSentiment":""}
-
-Website copy:
-${(homepageText || '').slice(0, 5000)}
-
-Reviews:
-${(reviewSnippets || '').slice(0, 3000)}
-`.trim();
-
-  const ctl = new AbortController();
-  const to = setTimeout(() => ctl.abort(), timeoutMs);
-  try {
-    const resp = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: prompt }]}] });
-    clearTimeout(to);
-    const txt = resp?.response?.text?.() || '';
-    if (!txt) return null;
-    try {
-      const parsed = JSON.parse(txt.replace(/^[\s`]+|[\s`]+$/g, ''));
-      const out = {
-        scores: parsed?.scores || {},
-        topPriority: parsed?.topPriority || '',
-        reviewSentiment: parsed?.reviewSentiment || '',
-      };
-      for (const k of ['painPointResonance','ctaStrength','websiteHealth','onPageSeo']) {
-        const v = Number(out.scores[k]);
-        if (Number.isFinite(v)) out.scores[k] = v <= 1 ? asPct(v) : Math.max(0, Math.min(100, Math.round(v)));
-        else delete out.scores[k];
-      }
-      return out;
-    } catch {
-      return { scores: {}, topPriority: '', reviewSentiment: '' };
-    }
-  } catch {
-    clearTimeout(to);
-    return null;
-  }
-}
-
-// Placeholders (safe; add fetching later if desired)
-async function fetchHomepageText(){ return ''; }
-async function fetchReviewSnippets(){ return ''; }
-
-// ---------- Trade mapping for competitor search ----------
-const TRADE_TO_PLACES = {
-  roofing:        { type: 'roofing_contractor', keywords: ['roofing', 'roof repair', 'roof replacement'] },
-  siding:         { type: 'contractor',         keywords: ['siding contractor', 'siding installation'] },
-  roofing_siding: { type: 'contractor',         keywords: ['roofing contractor', 'siding contractor'] },
-  hvac:           { type: 'hvac_contractor',    keywords: ['hvac', 'ac repair', 'heating', 'air conditioning'] },
-  plumbing:       { type: 'plumber',            keywords: ['plumber', 'drain', 'water heater'] },
-  electrical:     { type: 'electrician',        keywords: ['electrician', 'electrical contractor'] },
-  landscaping:    { type: 'landscaper',         keywords: ['landscaping', 'lawn care'] },
-  masonry:        { type: 'contractor',         keywords: ['masonry', 'brick', 'stone', 'block'] },
-  concrete:       { type: 'contractor',         keywords: ['concrete contractor', 'concrete'] },
-  general:        { type: 'general_contractor', keywords: ['general contractor', 'home improvement'] },
-  solar:          { type: 'contractor',         keywords: ['solar company', 'solar installer'] },
-  garage_doors:   { type: 'contractor',         keywords: ['garage door repair', 'garage door installation'] },
-  fencing:        { type: 'contractor',         keywords: ['fence contractor', 'fencing'] },
-  paving:         { type: 'contractor',         keywords: ['asphalt paving', 'driveway paving', 'paving contractor'] },
-  windows:        { type: 'contractor',         keywords: ['window replacement', 'door installation', 'windows and doors'] },
-  painting:       { type: 'painter',            keywords: ['house painter', 'painting contractor'] },
-};
-const normalizeTrade = t => (TRADE_TO_PLACES[String(t||'').toLowerCase()] ? String(t).toLowerCase() : 'general');
 
 // ---------- Routes ----------
-app.get('/api/health', (_req, res) => {
+app.get("/api/health", (req, res) => {
   res.json({ ok: true, env: NODE_ENV, adsEnabled: false });
 });
 
-app.post('/api/analyze', async (req, res) => {
-  try {
-    const {
-      placeId,
-      businessName,
-      websiteUrl,
-      serviceArea,
-      businessType,
-      fast = false,
-      useGemini = true,
-    } = req.body || {};
+app.post("/api/analyze", async (req, res) => {
+  const { businessName, websiteUrl, serviceArea, tradeSelect, fast } = req.body || {};
+  if (!businessName) return res.status(400).json({ success: false, error: "Missing businessName" });
 
-    const resolved = await resolvePlaceId({ placeId, businessName, websiteUrl, serviceArea });
-    if (!resolved.placeId) {
-      return res.json({
-        success: true,
-        finalScore: 0,
-        detailedScores: {
-          'Overall Rating': 0,
-          'Review Volume': 0,
-          'Pain Point Resonance': 0,
-          'Call-to-Action Strength': 0,
-          'Website Health': 0,
-          'On-Page SEO': 0,
-        },
-        detailedScoresCamel: {
-          overallRating: 0, reviewVolume: 0, painPointResonance: 0, ctaStrength: 0, websiteHealth: 0, onPageSeo: 0
-        },
-        geminiAnalysis: { scores: {}, topPriority: '', competitorAdAnalysis: '', reviewSentiment: '' },
-        topCompetitor: null,
-        mapEmbedUrl: '',
-        placeId: null,
-        clarifications: [{ candidates: resolved.candidates }, ...resolved.clarifications],
-        hints: { adsEnabled: false },
-      });
-    }
+  // 1) Resolve place (minimal fields)
+  const findArgs = {
+    params: {
+      key: GOOGLE_MAPS_API_KEY_SERVER,
+      input: serviceArea ? `${businessName} ${serviceArea}` : businessName,
+      inputtype: "textquery",
+      fields: ["place_id", "name", "formatted_address"],
+    },
+  };
+  const findRes = await mapsCall(gmaps.findPlaceFromText, findArgs);
+  if (!findRes.ok) return res.status(500).json({ success: false, error: "findPlaceFromText failed" });
 
-    const pid = resolved.placeId;
-
-    // Enrich with details (includes website, rating, review count)
-    const details = await maps.placeDetails({
-      params: {
-        key: GOOGLE_MAPS_API_KEY_SERVER,
-        place_id: pid,
-        fields: ['name','formatted_address','rating','user_ratings_total','website'],
-      },
-      timeout: 8000,
-    }).catch(() => ({ data: {} }));
-
-    const rating  = Number(details?.data?.result?.rating || 0);              // 0..5
-    const reviews = Number(details?.data?.result?.user_ratings_total || 0); // count
-    const overallRatingPct = asPct(rating / 5);
-    const reviewVolumePct  = reviewVolumeToScore(reviews);
-
-    const baseScoresDisplay = {
-      'Overall Rating': overallRatingPct,
-      'Review Volume': reviewVolumePct,
-      'Pain Point Resonance': 0,
-      'Call-to-Action Strength': 0,
-      'Website Health': 0,
-      'On-Page SEO': 0,
-    };
-
-    // Optional Gemini (kept safe: no scraping here)
-    let gemini = null;
-    if (useGemini && GEMINI_API_KEY && !fast) {
-      const homepageText = websiteUrl ? await fetchHomepageText(websiteUrl) : '';
-      const reviewSnips  = await fetchReviewSnippets(pid);
-      gemini = await runGeminiAnalysis({ homepageText, reviewSnippets: reviewSnips, timeoutMs: 12000 });
-    }
-
-    const { norm, display } = normalizeDetailedScores(baseScoresDisplay, gemini?.scores);
-    const finalScore = blendedFinalScore(norm);
-
+  const cands = findRes.data?.candidates || [];
+  if (!cands.length) {
+    return res.json({ success: true, clarifications: { reason: "NO_MATCH", message: "No matching place found.", candidates: [] } });
+  }
+  if (cands.length > 1) {
     return res.json({
       success: true,
-      finalScore,
-      detailedScores: display,
-      detailedScoresCamel: norm,
-      geminiAnalysis: {
-        scores: gemini?.scores || {},
-        topPriority: gemini?.topPriority || '',
-        competitorAdAnalysis: '',
-        reviewSentiment: gemini?.reviewSentiment || '',
+      clarifications: {
+        reason: "MULTI_MATCH",
+        message: "Multiple matches found; please pick one.",
+        candidates: cands.slice(0, 5).map((c) => ({
+          place_id: c.place_id,
+          name: c.name,
+          formatted_address: c.formatted_address,
+        })),
       },
-      topCompetitor: null,
-      mapEmbedUrl: buildMapsEmbedUrl(pid),
-      placeId: pid,
-      clarifications: [],
-      hints: { adsEnabled: false },
-      _debug: { businessType: businessType || '' }
-    });
-  } catch (err) {
-    console.error('analyze error', err);
-    res.status(200).json({
-      success: false,
-      error: 'Analysis failed, but request handled gracefully.',
-      hints: { adsEnabled: false },
     });
   }
+
+  const chosen = cands[0];
+  const placeId = chosen.place_id;
+
+  // 2) Place details for scoring
+  const detailsArgs = {
+    params: {
+      key: GOOGLE_MAPS_API_KEY_SERVER,
+      place_id: placeId,
+      fields: [
+        "place_id",
+        "name",
+        "formatted_address",
+        "website",
+        "rating",
+        "user_ratings_total",
+        "photos",
+        "formatted_phone_number",
+        "opening_hours",
+        "url",
+        "geometry",
+        "opening_hours.open_now",
+      ],
+    },
+  };
+  const detailsRes = await mapsCall(gmaps.placeDetails, detailsArgs);
+  if (!detailsRes.ok) return res.status(500).json({ success: false, error: "placeDetails failed", placeId });
+
+  const details = detailsRes.data?.result || {};
+  const gbp = scoreGBP(details);
+
+  // 3) SEO/CTA via homepage (skip if fast)
+  let seo = 0, cta = 0, seoBreakdown = {}, ctaBreakdown = {};
+  let emergencyWords = false;
+  let usedWebsite = details.website || websiteUrl || null;
+
+  if (!fast && usedWebsite) {
+    const { html, contentType } = await fetchHtml(usedWebsite, 6000);
+    if (html && (contentType || "").includes("text/html")) {
+      const $ = cheerio.load(html);
+      const ctaRes = scoreCTA({ $, placePhone: !!details.formatted_phone_number, placeHours: !!details.opening_hours });
+      cta = ctaRes.cta;
+      ctaBreakdown = ctaRes.ctaBreakdown;
+      emergencyWords = ctaRes.emergencyHint;
+
+      const seoRes = scoreSEO($);
+      seo = seoRes.seo;
+      seoBreakdown = seoRes.seoBreakdown;
+    } else {
+      // Non-HTML or fetch failed: keep zeros; fall back to GBP-only logic below if needed
+    }
+  }
+
+  // 4) Determine mode & blend weights
+  const hasSiteSignals = !fast && !!usedWebsite && (seo > 0 || cta > 0);
+  const openNow = !!details?.opening_hours?.open_now;
+  const emergencyMode = emergencyWords || openNow;
+
+  let mode = "GBP_ONLY";
+  let finalScore = gbp;
+
+  if (hasSiteSignals) {
+    const weights = pickWeights(tradeSelect, emergencyMode);
+    // Smart modifiers
+    const totalReviews = details?.user_ratings_total || 0;
+    const gbpAdjFactor = totalReviews < 10 ? 0.7 : 1.0;
+
+    // Blend
+    finalScore = Math.round(
+      (weights.seo * seo) + (weights.cta * cta) + (weights.gbp * gbp * gbpAdjFactor)
+    );
+
+    // Bonuses
+    if (totalReviews >= 200) finalScore = clamp(finalScore + 2, 0, 100);
+
+    // Very strong CTA: tel + ≥2 CTA buttons + a form → +3
+    if (ctaBreakdown?.directCall >= 25 && ctaBreakdown?.contactPaths >= 20) {
+      finalScore = clamp(finalScore + 3, 0, 100);
+    }
+
+    mode = emergencyMode ? "EMERGENCY" : "BLENDED_DYNAMIC";
+  }
+
+  // 5) Secondary dials (for your UI)
+  const reviewsDial = scoreReviews(details?.rating, details?.user_ratings_total);
+  const painDial = Math.max(0, 100 - reviewsDial);
+
+  const mapEmbedUrl = makeMapEmbedUrl(placeId);
+
+  res.json({
+    success: true,
+    placeId,
+    place: {
+      name: details?.name,
+      address: details?.formatted_address,
+      website: usedWebsite || null,
+      rating: details?.rating ?? null,
+      user_ratings_total: details?.user_ratings_total ?? null,
+      open_now: openNow,
+    },
+    finalScore,
+    mode,
+    seo,
+    cta,
+    gbp,
+    seoBreakdown,
+    ctaBreakdown,
+    dials: { reviews: reviewsDial, pain: painDial },
+    mapEmbedUrl,
+    weightsUsed: hasSiteSignals ? pickWeights(tradeSelect, emergencyMode) : { seo: 0, cta: 0, gbp: 1 },
+  });
 });
 
-/** Trade-aware competitor snapshot using Places Text Search (ToS-safe) */
-app.post('/api/competitive-snapshot', async (req, res) => {
-  try {
-    let {
-      placeId,
-      businessType = 'general',
-      serviceArea = '',
-      limit = 6,
-    } = req.body || {};
+app.post("/api/competitive-snapshot", async (req, res) => {
+  const { placeId, trade, area } = req.body || {};
 
-    if (!GOOGLE_MAPS_API_KEY_SERVER) {
-      return res.json({ success: false, error: 'Missing GOOGLE_MAPS_API_KEY_SERVER' });
+  // Optional geometry bias from place
+  let locationBias = null;
+  if (placeId) {
+    const dArgs = {
+      params: { key: GOOGLE_MAPS_API_KEY_SERVER, place_id: placeId, fields: ["geometry", "name"] },
+    };
+    const dRes = await mapsCall(gmaps.placeDetails, dArgs);
+    if (dRes.ok) {
+      const g = dRes.data?.result?.geometry?.location;
+      if (g?.lat && g?.lng) locationBias = { lat: g.lat, lng: g.lng };
     }
+  }
 
-    const tradeKey = normalizeTrade(businessType);
-    const tradeCfg = TRADE_TO_PLACES[tradeKey];
+  const query = trade && area ? `${trade} ${area}` : trade ? trade : area ? `contractor ${area}` : "contractor near me";
+  const tsArgs = {
+    params: {
+      key: GOOGLE_MAPS_API_KEY_SERVER,
+      query,
+      type: "establishment",
+      ...(locationBias ? { location: locationBias, radius: 15000 } : {}),
+    },
+  };
 
-    // 1) Bias search near the target business if we have its geometry
-    let bias = null;
-    if (placeId) {
-      const det = await maps.placeDetails({
-        params: { key: GOOGLE_MAPS_API_KEY_SERVER, place_id: placeId, fields: ['geometry'] },
-        timeout: 8000,
-      }).catch(() => ({ data: {} }));
-      const loc = det?.data?.result?.geometry?.location;
-      if (loc?.lat && loc?.lng) bias = { lat: loc.lat, lng: loc.lng };
-    }
+  const tsRes = await mapsCall(gmaps.textSearch, tsArgs);
+  if (!tsRes.ok) return res.status(500).json({ success: false, error: "textSearch failed" });
 
-    // 2) Build Text Search query
-    const queryBits = [];
-    if (tradeCfg?.keywords?.length) queryBits.push(tradeCfg.keywords[0]);
-    if (serviceArea) queryBits.push(`in ${serviceArea}`);
-    const query = queryBits.join(' ').trim() || 'contractor';
-
-    const tsParams = bias
-      ? { key: GOOGLE_MAPS_API_KEY_SERVER, query, location: bias, radius: 20000 }
-      : { key: GOOGLE_MAPS_API_KEY_SERVER, query };
-
-    if (tradeCfg?.type) tsParams.type = tradeCfg.type;
-
-    const ts = await maps.textSearch({ params: tsParams, timeout: 8000 });
-    const raw = (ts.data?.results || []).filter(r => r.place_id !== placeId);
-
-    // 3) Light post-filter by trade keywords
-    const kw = (tradeCfg?.keywords || []).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
-    const rx = kw ? new RegExp(kw, 'i') : null;
-    const filtered = rx ? raw.filter(r => rx.test(`${r.name} ${r.types?.join(' ') || ''}`)) : raw;
-
-    const ranked = filtered
-      .map(r => ({ ...r, __score: (Number(r.rating || 0)) * (Number(r.user_ratings_total || 0)) }))
-      .sort((a,b) => b.__score - a.__score)
-      .slice(0, limit);
-
-    // 4) Enrich each result
-    const items = [];
-    for (const r of ranked) {
-      const pid = r.place_id;
-      const det = await maps.placeDetails({
-        params: { key: GOOGLE_MAPS_API_KEY_SERVER, place_id: pid, fields: ['name','formatted_address','rating','user_ratings_total','website','photos','types'] },
-        timeout: 8000,
-      }).catch(() => ({ data: {} }));
-
-      const d = det?.data?.result || {};
-      const name = d.name || r.name || 'Unknown';
-      const address = d.formatted_address || r.formatted_address || '';
-      const rating = Number(d.rating || r.rating || 0);
-      const reviews = Number(d.user_ratings_total || r.user_ratings_total || 0);
-
-      let photoUrl = '';
-      const ref = d.photos?.[0]?.photo_reference;
-      if (ref && GOOGLE_MAPS_API_KEY_SERVER) {
-        photoUrl = `https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photo_reference=${encodeURIComponent(ref)}&key=${encodeURIComponent(GOOGLE_MAPS_API_KEY_SERVER)}`;
-      }
-
-      const encName = encodeURIComponent(name);
-      items.push({
-        placeId: pid,
-        name,
-        address,
-        rating,
-        reviews,
-        website: d.website || '',
-        photoUrl,
-        types: d.types || [],
-        links: {
-          googleAdsTransparency: `https://ads.transparency.google.com/advertiser?hl=en&search=${encName}`,
-          metaAdLibrary: `https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country=US&search_type=keyword_unordered&media_type=all&search=${encName}`,
-          googleMaps: `https://www.google.com/maps/search/?api=1&query=Google&query_place_id=${encodeURIComponent(pid)}`
-        },
-        inferredThemes: [],
-        counters: [],
-        reviewSentiment: ''
+  const basics = (tsRes.data?.results || []).slice(0, 10);
+  const enriched = [];
+  for (const b of basics) {
+    const dArgs = {
+      params: {
+        key: GOOGLE_MAPS_API_KEY_SERVER,
+        place_id: b.place_id,
+        fields: ["place_id", "name", "formatted_address", "rating", "user_ratings_total", "photos", "website"],
+      },
+    };
+    const dRes = await mapsCall(gmaps.placeDetails, dArgs);
+    if (dRes.ok) {
+      const r = dRes.data?.result || {};
+      enriched.push({
+        place_id: r.place_id,
+        name: r.name,
+        address: r.formatted_address,
+        rating: r.rating ?? null,
+        user_ratings_total: r.user_ratings_total ?? null,
+        website: r.website || null,
+        photoCount: (r.photos || []).length,
       });
     }
-
-    res.json({ success: true, competitors: items, _trade: tradeKey });
-  } catch (e) {
-    console.error('competitive-snapshot error', e);
-    res.json({ success: false, error: 'competitive-snapshot failed' });
   }
+
+  res.json({
+    success: true,
+    queryUsed: query,
+    biasedBy: locationBias,
+    competitors: enriched,
+    adIntel: {
+      googleAdsTransparency: "https://adstransparency.google.com/",
+      metaAdLibrary: "https://www.facebook.com/ads/library/",
+    },
+  });
 });
 
-// ---------- Static widget (for same-origin testing on Render) ----------
-app.use('/', express.static(path.join(__dirname, '..')));
-app.get('/', (_req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'widget.html'));
-});
-
-// ---------- Start ----------
 app.listen(PORT, () => {
-  console.log(`[elev8] listening on :${PORT} (${NODE_ENV}) — adsEnabled=${ENABLE_AD_SCRAPE && (IS_PROD ? ENABLE_AD_SCRAPE_IN_PROD : true)}`);
+  console.log(`Elev8Trades backend running on port ${PORT} [${NODE_ENV}]`);
 });
-
-module.exports = app;
