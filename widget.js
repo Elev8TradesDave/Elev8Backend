@@ -1,34 +1,214 @@
-const $ = (id) => document.getElementById(id);
-const API = (path) => path; // same origin; adjust if hosting separately
+/* ==============================================================
+   widget.js – FINAL POLISHED VERSION
+   - Clarification flex renderer
+   - Trade → businessType (case-insensitive)
+   - URL prefill from QR/query params
+   - Auto-fast mode when no website
+   - Full helper fallbacks
+   - Accessible clarifications
+   ============================================================== */
 
+const $ = id => document.getElementById(id);
+const API = path => (window.LVA_API_BASE || "") + path;
+
+/* --------------------------- Helpers --------------------------- */
 function setBar(id, value) {
   const el = $(id);
   if (!el) return;
-  el.style.width = `${Math.max(0, Math.min(100, value))}%`;
+  const v = Math.max(0, Math.min(100, Number(value) || 0));
+  el.style.width = v + "%";
 }
 
 function setText(id, text) {
   const el = $(id);
-  if (!el) return;
-  el.textContent = text;
+  if (el) el.textContent = (text ?? "").toString();
 }
 
+async function fetchWithTimeout(resource, options = {}, timeoutMs = 15000) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(resource, { ...options, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function normUrlMaybe(u) {
+  if (!u) return "";
+  const s = u.trim();
+  return /^https?:\/\//i.test(s) ? s : "https://" + s;
+}
+
+function deriveBusinessType(trade) {
+  const t = (trade || "").toLowerCase().trim();
+  const specialty = ["roofing", "plumbing", "electrical", "hvac"];
+  return specialty.includes(t) ? "specialty" : "maintenance";
+}
+
+/* ------------------- Prefill from URL (QR, ads) ---------------- */
+(function prefillFromQuery() {
+  const p = new URLSearchParams(location.search);
+  if (p.has("trade")) $("tradeSelect").value = p.get("trade");
+  if (p.has("area")) $("area").value = p.get("area");
+  if (p.has("name")) $("bName").value = p.get("name");
+  if (p.has("url")) $("webUrl").value = normUrlMaybe(p.get("url"));
+
+  // Auto-enable Fast mode if no website (UX win)
+  if (!$("webUrl").value.trim()) $("fast").checked = true;
+})();
+
+/* ------------------- Clarification UI (Flexible) --------------- */
+function clearClarifications() {
+  const wrap = $("clarWrap");
+  const msgEl = $("clarMsg");
+  const list = $("clarList");
+  wrap?.classList.remove("show");
+  if (msgEl) msgEl.textContent = "";
+  if (list) list.innerHTML = "";
+}
+
+function renderClarificationsFlex(clar) {
+  const wrap = $("clarWrap");
+  const msgEl = $("clarMsg");
+  const list = $("clarList");
+
+  clearClarifications(); // safety
+
+  // Normalize: {message,candidates} OR array of objects
+  const clarArr = Array.isArray(clar) ? clar : [clar || {}];
+  const msgs = [];
+  let candidates = [];
+
+  clarArr.forEach(item => {
+    if (item?.message) msgs.push(item.message);
+    if (Array.isArray(item?.candidates)) candidates = candidates.concat(item.candidates);
+  });
+
+  // Accessibility: announce changes
+  if (msgEl) {
+    msgEl.textContent = msgs.join(" ") || "Multiple matches found.";
+    msgEl.setAttribute("aria-live", "polite");
+  }
+
+  candidates.slice(0, 8).forEach(c => {
+    const btn = document.createElement("button");
+    btn.className = "clar-btn";
+    btn.textContent = `${c.name || "Unnamed"} — ${c.formatted_address || ""}`;
+    btn.onclick = () => analyzeWithPlaceId(c.place_id, c.name, c.formatted_address);
+    btn.setAttribute("aria-label", `Select ${c.name}`);
+    list?.appendChild(btn);
+  });
+
+  if (candidates.length === 0) {
+    const hint = document.createElement("div");
+    hint.className = "clar-hint";
+    hint.textContent =
+      "No exact matches. Try adding a city/state, shortening the name, or using the website URL.";
+    list?.appendChild(hint);
+  }
+
+  wrap?.classList.add("show");
+}
+
+/* ----------------------- Button Control ----------------------- */
+function disableButtons(disabled = true) {
+  $("btnAnalyze")?.toggleAttribute("disabled", disabled);
+  $("btnCompetitors")?.toggleAttribute("disabled", disabled);
+}
+
+/* -------------------------- Analysis -------------------------- */
+let lastPlaceId = null;
+
 async function analyze() {
+  clearClarifications();
+  disableButtons(true);
+
   const body = {
     businessName: $("bName").value.trim(),
     websiteUrl: $("webUrl").value.trim(),
     serviceArea: $("area").value.trim(),
-    tradeSelect: $("tradeSelect").value,
-    fast: $("fast").checked
+    tradeSelect: $("tradeSelect").value.trim(),
+    fast: $("fast").checked,
   };
 
+  if (body.websiteUrl) body.websiteUrl = normUrlMaybe(body.websiteUrl);
+  body.businessType = deriveBusinessType(body.tradeSelect);
+
+  if (!body.businessName) {
+    setText("details", "Please enter a business name.");
+    disableButtons(false);
+    return;
+  }
+
   setText("details", "Analyzing…");
+  setText("competitors", "—");
+  $("mapEmbedWrap").style.display = "none";
+
   try {
-    const res = await fetch(API("/api/analyze"), {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify(body)
-    });
+    const res = await fetchWithTimeout(
+      API("/api/analyze"),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      15000
+    );
+    const data = await res.json();
+
+    if (!data.success) {
+      setText("details", `Error: ${data.error || "Unknown"}`);
+      disableButtons(false);
+      return;
+    }
+
+    if (data.clarifications) {
+      renderClarificationsFlex(data.clarifications);
+      setText("details", `Clarification needed:\n${JSON.stringify(data.clarifications, null, 2)}`);
+      disableButtons(false);
+      return;
+    }
+
+    renderScoring(data);
+    lastPlaceId = data.placeId || null;
+    await competitors(lastPlaceId, body.tradeSelect, body.serviceArea);
+  } catch (e) {
+    setText("details", `Request failed: ${e.name === "AbortError" ? "Timed out" : e.message}`);
+  } finally {
+    disableButtons(false);
+  }
+}
+
+async function analyzeWithPlaceId(placeId, name, address) {
+  clearClarifications();
+  disableButtons(true);
+
+  const body = {
+    businessName: $("bName").value.trim() || name || "",
+    websiteUrl: $("webUrl").value.trim(),
+    serviceArea: $("area").value.trim() || address || "",
+    tradeSelect: $("tradeSelect").value.trim(),
+    fast: $("fast").checked,
+    placeId,
+    businessType: deriveBusinessType($("tradeSelect").value.trim()),
+  };
+  if (body.websiteUrl) body.websiteUrl = normUrlMaybe(body.websiteUrl);
+
+  setText("details", "Analyzing selected place…");
+  setText("competitors", "—");
+  $("mapEmbedWrap").style.display = "none";
+
+  try {
+    const res = await fetchWithTimeout(
+      API("/api/analyze"),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      15000
+    );
     const data = await res.json();
 
     if (!data.success) {
@@ -36,78 +216,98 @@ async function analyze() {
       return;
     }
 
-    if (data.clarifications) {
-      setText("details", `Clarification needed: ${data.clarifications.message}\n\n` +
-        JSON.stringify(data.clarifications.candidates || [], null, 2));
-      return;
-    }
-
-    // Bars & numbers
-    setBar("overallBar", data.finalScore || 0);
-    setText("overallPct", `${data.finalScore ?? "—"} / 100`);
-    setText("modeBadge", data.mode || "—");
-
-    setBar("barSeo", data.seo || 0); setText("valSeo", `${data.seo ?? "—"}`);
-    setBar("barCta", data.cta || 0); setText("valCta", `${data.cta ?? "—"}`);
-    setBar("barGbp", data.gbp || 0); setText("valGbp", `${data.gbp ?? "—"}`);
-
-    setBar("barReviews", data.dials?.reviews || 0); setText("valReviews", `${data.dials?.reviews ?? "—"}`);
-    setBar("barPain", data.dials?.pain || 0); setText("valPain", `${data.dials?.pain ?? "—"}`);
-
-    // Map
-    if (data.mapEmbedUrl) {
-      $("mapEmbed").src = data.mapEmbedUrl;
-      $("mapEmbedWrap").style.display = "";
-    } else {
-      $("mapEmbedWrap").style.display = "none";
-    }
-
-    // Details
-    const { place, weightsUsed, seoBreakdown, ctaBreakdown } = data;
-    const det = {
-      place,
-      mode: data.mode,
-      weightsUsed,
-      seoBreakdown,
-      ctaBreakdown
-    };
-    setText("details", JSON.stringify(det, null, 2));
-
-    // Auto-fetch competitors
-    await competitors(data.placeId, body.tradeSelect, body.serviceArea);
-
+    renderScoring(data);
+    lastPlaceId = data.placeId || placeId || null;
+    await competitors(lastPlaceId, $("tradeSelect").value.trim(), $("area").value.trim());
   } catch (e) {
-    setText("details", `Request failed: ${e.message}`);
+    setText("details", `Request failed: ${e.name === "AbortError" ? "Timed out" : e.message}`);
+  } finally {
+    disableButtons(false);
   }
 }
 
+/* ----------------------- Render Scoring ----------------------- */
+function renderScoring(data) {
+  setBar("overallBar", data.finalScore || 0);
+  setText("overallPct", (data.finalScore ?? "—") + " / 100");
+  setText("modeBadge", data.mode || "—");
+
+  const ds = data.detailedScores || {};
+
+  setBar("barSeo", ds["On-Page SEO"] ?? data.seo ?? 0);
+  setText("valSeo", ds["On-Page SEO"] ?? data.seo ?? "—");
+
+  setBar("barCta", ds["Call-to-Action Strength"] ?? data.cta ?? 0);
+  setText("valCta", ds["Call-to-Action Strength"] ?? data.cta ?? "—");
+
+  setBar("barGbp", ds["Overall Rating"] ?? data.gbp ?? 0);
+  setText("valGbp", ds["Overall Rating"] ?? data.gbp ?? "—");
+
+  const reviews = ds["Review Volume"] ?? data?.dials?.reviews ?? null;
+  const pain = ds["Pain Point Resonance"] ?? data?.dials?.pain ?? null;
+  setBar("barReviews", reviews || 0);
+  setText("valReviews", reviews ?? "—");
+  setBar("barPain", pain || 0);
+  setText("valPain", pain ?? "—");
+
+  if (data.mapEmbedUrl) {
+    $("mapEmbed").src = data.mapEmbedUrl;
+    $("mapEmbedWrap").style.display = "";
+  } else {
+    $("mapEmbedWrap").style.display = "none";
+  }
+
+  const det = {
+    placeId: data.placeId,
+    place: data.place,
+    mode: data.mode,
+    weightsUsed: data.weightsUsed,
+    seoBreakdown: data.seoBreakdown,
+    ctaBreakdown: data.ctaBreakdown,
+    detailedScores: ds,
+  };
+  setText("details", JSON.stringify(det, null, 2));
+}
+
+/* ------------------------- Competitors ------------------------- */
 async function competitors(placeId, trade, area) {
+  if (!trade && !area && !placeId) {
+    setText("competitors", "Provide a trade or area (or run Analyze first).");
+    return;
+  }
   setText("competitors", "Fetching competitors…");
   try {
-    const res = await fetch(API("/api/competitive-snapshot"), {
-      method: "POST",
-      headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ placeId, trade, area })
-    });
+    const res = await fetchWithTimeout(
+      API("/api/competitive-snapshot"),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ placeId, trade, area }),
+      },
+      15000
+    );
     const data = await res.json();
     if (!data.success) {
       setText("competitors", `Error: ${data.error || "Unknown"}`);
       return;
     }
-    setText("competitors", JSON.stringify({
+    const out = {
       query: data.queryUsed,
       biasedBy: data.biasedBy,
       competitors: data.competitors,
-      adIntel: data.adIntel
-    }, null, 2));
+      adIntel: data.adIntel,
+    };
+    setText("competitors", JSON.stringify(out, null, 2));
   } catch (e) {
-    setText("competitors", `Request failed: ${e.message}`);
+    setText("competitors", `Request failed: ${e.name === "AbortError" ? "Timed out" : e.message}`);
   }
 }
 
-$("btnAnalyze").addEventListener("click", analyze);
-$("btnCompetitors").addEventListener("click", () => {
-  const placeId = null; // user can paste one into the form if you add a field
-  competitors(placeId, $("tradeSelect").value, $("area").value.trim());
-});
-$("btnTop").addEventListener("click", () => window.scrollTo({ top: 0, behavior: "smooth" }));
+/* -------------------------- Wiring --------------------------- */
+$("btnAnalyze")?.addEventListener("click", analyze);
+$("btnCompetitors")?.addEventListener("click", () =>
+  competitors(lastPlaceId, $("tradeSelect").value.trim(), $("area").value.trim())
+);
+$("btnTop")?.addEventListener("click", () =>
+  window.scrollTo({ top: 0, behavior: "smooth" })
+);
