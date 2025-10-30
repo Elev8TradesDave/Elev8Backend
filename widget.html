@@ -1,143 +1,110 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
+  <meta charset="utf-8"/>
   <title>Elev8Trades — Local Visibility Audit</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <style>
-    :root { color-scheme: light dark; }
-    body {
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      margin: 24px; line-height: 1.45; background:#0b0d0f; color:#e6e7e8;
-    }
-    .wrap { max-width: 1100px; margin: 0 auto; }
-    h1 { font-size: 1.6rem; margin: 0 0 10px; }
-    .muted { opacity: .72; }
-    .row { margin: 12px 0; display: grid; gap: 6px; }
-    .inline { display:flex; gap: 12px; align-items:center; flex-wrap: wrap; }
-    input, select {
-      padding: 10px 12px; border-radius: 10px; background:#14181d; color:#e6e7e8; border:1px solid #232a31; outline: none;
-    }
-    input:focus { border-color:#3a4856; }
-    button {
-      padding: 10px 14px; border-radius: 10px; border: 1px solid #232a31;
-      background:#111827; color:#fff; cursor: pointer;
-    }
-    button:disabled { opacity: .6; cursor: not-allowed; }
-    .section { margin: 26px 0; }
-    .card {
-      background:#0f1318; border:1px solid #212933; border-radius:14px; padding:16px;
-    }
-    .grid { display:grid; gap:16px; }
-    .grid-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
-    .bar { height: 10px; background:#1b2128; border-radius: 999px; overflow: hidden; }
-    .bar > span { display:block; height:100%; background:#22c55e; width:0%; transition: width .4s ease; }
-    .rowlabel { display:flex; justify-content: space-between; gap: 16px; }
-    .embed { border:0; width:100%; height:380px; border-radius: 12px; background:#0f1318; }
-    .pill { display:inline-block; padding:4px 8px; border:1px solid #2a2e35; border-radius:999px; font-size:.85rem; }
-    .btn-secondary { background:#0f1318; }
-    .hint { font-size:.92rem; }
-    a.btn-link { padding:6px 10px; border:1px solid #2a2e35; border-radius:8px; text-decoration:none; color:#e6e7e8;}
-    .thumb { width:100%; height:140px; object-fit:cover; border-radius: 10px; background:#0b0d0f; }
-    .row-compact { margin: 6px 0; }
+    :root{color-scheme:light dark;}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#0b0c0f;color:#e8f0ec;margin:0}
+    .wrap{max-width:1100px;margin:24px auto;padding:0 18px}
+    h1{font-size:28px;margin:0 0 8px}
+    .card{background:#121418;border:1px solid #1c2126;border-radius:16px;padding:16px;margin:16px 0}
+    .row{display:grid;gap:8px;margin:10px 0}
+    .row>input,.row>select{background:#0f1216;border:1px solid #1c2126;border-radius:10px;color:#e8f0ec;padding:10px}
+    .controls{display:flex;gap:12px;align-items:center;margin:8px 0}
+    button{padding:10px 14px;border:0;border-radius:12px;background:#3DFF6C;color:#0b0c0f;font-weight:800;cursor:pointer}
+    .grid{display:grid;gap:14px}
+    .grid.cols-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .scores{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .meter{height:10px;background:#0f1216;border:1px solid #1c2126;border-radius:999px;overflow:hidden}
+    .meter>span{display:block;height:100%;background:#3DFF6C;width:0%}
+    .pill{display:inline-flex;gap:6px;align-items:center;background:#0f1216;border:1px solid #1c2126;border-radius:999px;padding:6px 10px;font-size:12px;color:#a9b3ad}
+    .competitors{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+    .comp-card{background:#0f1216;border:1px solid #1c2126;border-radius:12px;overflow:hidden}
+    .comp-card img{width:100%;height:160px;object-fit:cover;display:block;background:#0d0f12}
+    .comp-body{padding:12px}
+    .links{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+    .link-btn{font-size:12px;padding:6px 8px;border-radius:8px;background:#121418;border:1px solid #1c2126;color:#e8f0ec;text-decoration:none}
+    @media (max-width:860px){.grid.cols-3{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Elev8Trades — Local Visibility Audit</h1>
-    <div class="muted">Resolve your business on Google, score your presence, and see nearby competitors.</div>
+    <p>Resolve your business on Google, score your presence, and see <b>trade-specific</b> competitors.</p>
 
-    <div class="section card">
-      <div class="row">
-        <label for="businessName">Business Name *</label>
-        <input id="businessName" placeholder="A&K Artistic Masonry LLC" />
-      </div>
+    <div class="card">
+      <div class="grid cols-3">
+        <label class="row">Business Name*<input id="bName" placeholder="All State Home Improvement Inc." required></label>
+        <label class="row">Website URL<input id="webUrl" placeholder="https://yourdomain.com"></label>
+        <label class="row">Primary Service Area (City/County/Region)<input id="area" placeholder="Hillside, New Jersey"></label>
 
-      <div class="row">
-        <label for="websiteUrl">Website URL (domain or full URL)</label>
-        <input id="websiteUrl" placeholder="example.com or https://example.com" />
-        <div class="muted hint">A correct domain helps us match the exact place.</div>
-      </div>
+        <label class="row">Trade*
+          <select id="tradeSelect" required>
+            <option value="">Select your trade…</option>
+            <option value="roofing">Roofing</option>
+            <option value="siding">Siding</option>
+            <option value="roofing_siding">Roofing & Siding</option>
+            <option value="hvac">HVAC</option>
+            <option value="plumbing">Plumbing</option>
+            <option value="electrical">Electrical</option>
+            <option value="landscaping">Landscaping</option>
+            <option value="masonry">Masonry</option>
+            <option value="concrete">Concrete</option>
+            <option value="general">General Contractor</option>
+            <option value="solar">Solar</option>
+            <option value="garage_doors">Garage Doors</option>
+            <option value="fencing">Fencing</option>
+            <option value="paving">Paving / Asphalt</option>
+            <option value="windows">Windows & Doors</option>
+            <option value="painting">Painting</option>
+          </select>
+        </label>
 
-      <div class="grid grid-2">
         <div class="row">
-          <label>Business Type *</label>
-          <div class="inline">
-            <label class="pill"><input type="radio" name="biztype" value="specialty" checked /> Specialty</label>
-            <label class="pill"><input type="radio" name="biztype" value="maintenance" /> Maintenance</label>
-            <label class="pill"><input type="radio" name="biztype" value="contractor" /> Contractor</label>
+          <div class="controls">
+            <label><input type="checkbox" id="fast"> Fast test mode</label>
+            <button id="btnAnalyze">Analyze My Business</button>
+            <button id="btnCompetitors" title="Fetch nearby competitors for your trade">See Competitors</button>
           </div>
         </div>
-        <div class="row">
-          <label for="serviceArea">Primary Service Area (City/County/Region)</label>
-          <input id="serviceArea" placeholder="Newark, NJ / Monmouth County / North Jersey" />
+      </div>
+
+      <div class="scores" style="margin-top:12px">
+        <div class="card">
+          <div class="pill">Overall Score</div>
+          <div id="overallPct" style="font-size:32px;font-weight:900;margin:6px 0">—</div>
+          <div class="meter"><span id="overallBar"></span></div>
+        </div>
+        <div class="card">
+          <div class="pill">Signals</div>
+          <div class="grid">
+            <div>Overall Rating: <b id="s_overall">—</b></div>
+            <div>Review Volume: <b id="s_reviews">—</b></div>
+            <div>Pain Point Resonance: <b id="s_pain">—</b></div>
+            <div>CTA Strength: <b id="s_cta">—</b></div>
+            <div>Website Health: <b id="s_web">—</b></div>
+            <div>On-Page SEO: <b id="s_onpage">—</b></div>
+          </div>
         </div>
       </div>
 
-      <div class="inline">
-        <button id="analyzeBtn">Analyze My Business</button>
-        <label class="inline"><input type="checkbox" id="fast" /> Fast test mode</label>
-        <span class="muted hint">Origin: <code id="apiBaseText">same-origin</code></span>
-      </div>
-    </div>
-
-    <div class="section grid grid-2">
-      <div class="card">
-        <div class="rowlabel"><strong>Overall Score</strong><span id="overallPct">—</span></div>
-        <div class="bar"><span id="overallBar"></span></div>
-
-        <div class="rowlabel row-compact"><span>Overall Rating</span><span id="sc1">—</span></div>
-        <div class="bar"><span id="bar1"></span></div>
-
-        <div class="rowlabel row-compact"><span>Review Volume</span><span id="sc2">—</span></div>
-        <div class="bar"><span id="bar2"></span></div>
-
-        <div class="rowlabel row-compact"><span>Pain Point Resonance</span><span id="sc3">—</span></div>
-        <div class="bar"><span id="bar3"></span></div>
-
-        <div class="rowlabel row-compact"><span>Call-to-Action Strength</span><span id="sc4">—</span></div>
-        <div class="bar"><span id="bar4"></span></div>
-
-        <div class="rowlabel row-compact"><span>Website Health</span><span id="sc5">—</span></div>
-        <div class="bar"><span id="bar5"></span></div>
-
-        <div class="rowlabel row-compact"><span>On-Page SEO</span><span id="sc6">—</span></div>
-        <div class="bar"><span id="bar6"></span></div>
+      <div id="mapEmbedWrap" class="card" style="display:none">
+        <div class="pill">Map Preview</div>
+        <iframe id="mapEmbed" style="width:100%;height:320px;border:0;border-radius:12px;margin-top:8px" loading="lazy"></iframe>
       </div>
 
       <div class="card">
-        <details open>
-          <summary><strong>Recommended Next Step</strong></summary>
-          <div id="nextStep" class="muted">—</div>
-        </details>
-
-        <details>
-          <summary><strong>Competitor Ad Themes</strong></summary>
-          <div id="adThemes" class="muted">Ads scraping is disabled (ToS-safe). Use links in the Competitors section.</div>
-        </details>
-
-        <details>
-          <summary><strong>Review Sentiment</strong></summary>
-          <div id="revSent" class="muted">—</div>
-        </details>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div class="pill">Competitors Near You</div>
+          <button id="btnTop" style="background:#121418;color:#e8f0ec;border:1px solid #1c2126">See Top Competitors Nearby</button>
+        </div>
+        <div id="competitorsBox" class="competitors" style="margin-top:12px"></div>
       </div>
-    </div>
-
-    <div class="section card">
-      <iframe id="mapFrame" class="embed" loading="lazy" title="Business location"></iframe>
-    </div>
-
-    <div class="section card">
-      <div class="inline" style="justify-content: space-between; align-items: center;">
-        <strong>Competitors Near You</strong>
-        <button id="showCompetitors" class="btn-secondary">See Top Competitors Nearby</button>
-      </div>
-      <div id="competitors" style="display:grid; gap:16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-top:16px;"></div>
     </div>
   </div>
 
-  <!-- Same-origin by default; override on other hosts by setting window.API_BASE before this script -->
-  <script>window.API_BASE = '';</script>
-  <script type="module" src="./widget.js"></script>
+  <script src="/widget.js"></script>
 </body>
 </html>

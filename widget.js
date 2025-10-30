@@ -1,180 +1,211 @@
-// ---------- CONFIG ----------
-const hostProvided = (window.API_BASE || '').trim();
-const API_BASE = hostProvided; // '' => same-origin (e.g., '/api/analyze')
-const apiBaseTextEl = document.getElementById('apiBaseText');
-if (apiBaseTextEl) apiBaseTextEl.textContent = API_BASE ? API_BASE : 'same-origin';
+/* widget.js — Elev8Trades Local Visibility Audit (IDs aligned to widget.html) */
 
-// ---------- DOM ----------
-const el = (id) => document.getElementById(id);
-const bName = el('businessName');
-const webUrl = el('websiteUrl');
-const area   = el('serviceArea');
-const fast   = el('fast');
-
-const overallPct = el('overallPct');
-const overallBar = el('overallBar');
-
-const labels = [
-  { bar: el('bar1'), txt: el('sc1'), key: ['overallRating', 'Overall Rating'] },
-  { bar: el('bar2'), txt: el('sc2'), key: ['reviewVolume', 'Review Volume'] },
-  { bar: el('bar3'), txt: el('sc3'), key: ['painPointResonance', 'Pain Point Resonance'] },
-  { bar: el('bar4'), txt: el('sc4'), key: ['ctaStrength', 'Call-to-Action Strength'] },
-  { bar: el('bar5'), txt: el('sc5'), key: ['websiteHealth', 'Website Health'] },
-  { bar: el('bar6'), txt: el('sc6'), key: ['onPageSeo', 'On-Page SEO'] },
-];
-
-const nextStep = el('nextStep');
-const adThemes = el('adThemes');
-const revSent  = el('revSent');
-const mapFrame = el('mapFrame');
-
-const competitorsBox = el('competitors');
-const showCompetitorsBtn = el('showCompetitors');
-
-// Track last placeId from /analyze (helps bias competitor search)
-let LAST_PLACE_ID = null;
-
-// ---------- UI helpers ----------
-function clamp(x, lo=0, hi=100) { return Math.max(lo, Math.min(hi, x|0)); }
-function updateBar(barEl, pct) { barEl.style.width = clamp(pct) + '%'; }
-function setBusy(b){ el('analyzeBtn').disabled = !!b; if (showCompetitorsBtn) showCompetitorsBtn.disabled = !!b; }
-
-// ---------- API helpers ----------
-function url(path) {
-  // If API_BASE is '', we use same-origin like '/api/analyze'
-  return `${API_BASE}${path}`;
-}
-
-async function post(path, body) {
-  const res = await fetch(url(path), {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify(body || {})
+/* ---------- helpers ---------- */
+const $ = s => document.querySelector(s);
+const clamp = (n,min=0,max=100)=>Math.max(min,Math.min(max,Number(n)||0));
+async function post(url, body){
+  const r = await fetch(url, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body||{})
   });
-  return await res.json();
+  try { return await r.json(); } catch { return { success:false, error:`HTTP ${r.status}` }; }
 }
 
-// ---------- Analyze flow ----------
-function resetScoresUI() {
-  overallPct.textContent = '—'; updateBar(overallBar, 0);
-  labels.forEach(({ bar, txt }) => { txt.textContent = '—'; updateBar(bar, 0); });
-  nextStep.textContent = '—'; adThemes.textContent = '—'; revSent.textContent = '—';
-  mapFrame.src = '';
+/* ---------- DOM refs (match your HTML) ---------- */
+const nameInput   = $('#bName');
+const urlInput    = $('#webUrl');
+const areaInput   = $('#area');
+const tradeSelect = $('#tradeSelect');
+const fastInput   = $('#fast');
+
+const btnAnalyze      = $('#btnAnalyze');
+const btnCompetitors  = $('#btnCompetitors');
+const btnTop          = $('#btnTop');
+
+const overallPct = $('#overallPct');
+const overallBar = $('#overallBar');
+
+const s_overall = $('#s_overall');
+const s_reviews = $('#s_reviews');
+const s_pain    = $('#s_pain');
+const s_cta     = $('#s_cta');
+const s_web     = $('#s_web');
+const s_onpage  = $('#s_onpage');
+
+const mapWrap  = $('#mapEmbedWrap');
+const mapFrame = $('#mapEmbed');
+
+const competitorsBox = $('#competitorsBox');
+
+/* ---------- state ---------- */
+let lastPlaceId = null;
+
+/* ---------- UI helpers ---------- */
+function setBusy(b){ document.documentElement.classList.toggle('is-busy', !!b); }
+function resetScores(){
+  overallPct.textContent = '—';
+  overallBar.style.width = '0%';
+  s_overall.textContent = '—';
+  s_reviews.textContent = '—';
+  s_pain.textContent    = '—';
+  s_cta.textContent     = '—';
+  s_web.textContent     = '—';
+  s_onpage.textContent  = '—';
+}
+function put(valEl, barEl, v){
+  const n = clamp(v);
+  if (valEl) valEl.textContent = n;
+  if (barEl) barEl.style.width = n + '%';
+}
+function readTrade(){
+  const v = (tradeSelect?.value || '').trim();
+  return v || 'general';
 }
 
-function readBizType() {
-  return document.querySelector('input[name="biztype"]:checked')?.value || 'contractor';
-}
-
-function getScoreValue(data, camelKey, labelKey) {
-  // Prefer camelCase if server sent detailedScoresCamel; else fall back to label map.
-  const camel = data.detailedScoresCamel || {};
-  const label = data.detailedScores || {};
-  if (camelKey in camel) return camel[camelKey];
-  if (labelKey in label) return label[labelKey];
-  return 0;
-}
-
-async function analyze(extra = {}) {
-  resetScoresUI(); setBusy(true);
-  try {
+/* ---------- ANALYZE ---------- */
+async function analyze(){
+  resetScores(); setBusy(true);
+  try{
     const payload = {
-      businessName: bName.value.trim(),
-      websiteUrl:   webUrl.value.trim(),
-      serviceArea:  area.value.trim(),
-      businessType: readBizType(),
-      fast: !!fast.checked,
-      useGemini: true,
-      ...extra,
+      businessName: (nameInput?.value || '').trim(),
+      websiteUrl:   (urlInput?.value   || '').trim(),
+      serviceArea:  (areaInput?.value  || '').trim(),
+      businessType: readTrade(),
+      fast: !!(fastInput && fastInput.checked),
+      useGemini: true
     };
 
     const data = await post('/api/analyze', payload);
-    console.log('analyze response', data);
+    console.log('[analyze]', data);
 
-    if (!data?.success) {
-      overallPct.textContent = 'Error'; return;
+    if (!data?.success){
+      overallPct.textContent = 'Error';
+      return;
     }
 
-    LAST_PLACE_ID = data.placeId || LAST_PLACE_ID || null;
+    lastPlaceId = data.placeId || null;
 
-    // Overall
-    const final = clamp(Number(data.finalScore) || 0);
+    // overall
+    const final = clamp(data.finalScore || 0);
     overallPct.textContent = final + '%';
-    updateBar(overallBar, final);
+    overallBar.style.width = final + '%';
 
-    // Metrics
-    for (const { bar, txt, key } of labels) {
-      const v = clamp(Number(getScoreValue(data, key[0], key[1])) || 0);
-      txt.textContent = v + '%';
-      updateBar(bar, v);
+    // signals (labels come from server as human-readable keys)
+    const ds = data.detailedScores || {};
+    put(s_overall,  null, ds['Overall Rating'] ?? 0);
+    put(s_reviews,  null, ds['Review Volume'] ?? 0);
+    put(s_pain,     null, ds['Pain Point Resonance'] ?? 0);
+    put(s_cta,      null, ds['Call-to-Action Strength'] ?? 0);
+    put(s_web,      null, ds['Website Health'] ?? 0);
+    put(s_onpage,   null, ds['On-Page SEO'] ?? 0);
+
+    // map
+    if (data.mapEmbedUrl){
+      if (mapFrame) mapFrame.src = data.mapEmbedUrl;
+      if (mapWrap)  mapWrap.style.display = '';
     }
 
-    // AI bits
-    nextStep.textContent = data?.geminiAnalysis?.topPriority || '—';
-    adThemes.textContent = data?.geminiAnalysis?.competitorAdAnalysis || 'Use competitor cards below to view official ad libraries.';
-    revSent.textContent  = data?.geminiAnalysis?.reviewSentiment || '—';
+    // auto-pull competitors after a successful analyze
+    await fetchCompetitors({
+      placeId: lastPlaceId,
+      businessType: readTrade(),
+      serviceArea: (areaInput?.value || '').trim()
+    });
 
-    // Map
-    if (data?.mapEmbedUrl) mapFrame.src = data.mapEmbedUrl;
-  } finally {
+    // if we couldn't resolve place but got candidates, surface that hint
+    if (!lastPlaceId && Array.isArray(data?.clarifications) && data.clarifications.length){
+      console.warn('Clarifications from API:', data.clarifications);
+    }
+
+  } catch(err){
+    console.error(err);
+    overallPct.textContent = 'Error';
+  } finally{
     setBusy(false);
   }
 }
 
-document.getElementById('analyzeBtn').addEventListener('click', () => analyze());
-
-// ---------- Competitors ----------
-function compCard(c) {
-  const rating = (typeof c.rating === 'number' && c.rating >= 0) ? c.rating.toFixed(1) : '—';
+/* ---------- COMPETITORS ---------- */
+function compCardHTML(c){
+  const stars = (Number(c.rating||0)).toFixed(1);
+  const revs  = Number(c.reviews||0);
+  const img   = c.photoUrl ? `<img src="${c.photoUrl}" alt="${c.name}" loading="lazy">` : `<div style="height:160px;background:#0d0f12"></div>`;
+  const links = `
+    <div class="links">
+      <a class="link-btn" href="${c.links.googleAdsTransparency}" target="_blank" rel="noopener">Google Ads</a>
+      <a class="link-btn" href="${c.links.metaAdLibrary}" target="_blank" rel="noopener">Meta Ads</a>
+      <a class="link-btn" href="${c.links.googleMaps}" target="_blank" rel="noopener">Maps</a>
+      ${c.website ? `<a class="link-btn" href="${c.website}" target="_blank" rel="noopener">Website</a>` : ''}
+    </div>`;
   return `
-  <div class="card">
-    ${c.photoUrl ? `<img class="thumb" src="${c.photoUrl}" alt="${c.name}">` : ''}
-    <div style="margin-top:10px;">
-      <div style="font-weight:700">${c.name}</div>
-      <div class="muted">${c.address || ''}</div>
-      <div class="row-compact">⭐ ${rating} · ${c.reviews ?? 0} reviews</div>
-      ${Array.isArray(c.inferredThemes) && c.inferredThemes.length ? `<div class="row-compact"><strong>Themes:</strong> ${c.inferredThemes.join(', ')}</div>` : ''}
-      ${Array.isArray(c.counters) && c.counters.length ? `<div class="row-compact"><strong>Counter-angles:</strong> ${c.counters.join('; ')}</div>` : ''}
-      ${c.reviewSentiment ? `<div class="row-compact"><strong>Reviews:</strong> ${c.reviewSentiment}</div>` : ''}
-      <div class="inline" style="margin-top:8px; flex-wrap: wrap; gap:8px;">
-        <a class="btn-link" href="${c.links.googleAdsTransparency}" target="_blank" rel="noopener">Google Ads</a>
-        <a class="btn-link" href="${c.links.metaAdLibrary}" target="_blank" rel="noopener">Meta Ads</a>
-        <a class="btn-link" href="${c.links.googleMaps}" target="_blank" rel="noopener">Maps</a>
-        ${c.website ? `<a class="btn-link" href="${c.website}" target="_blank" rel="noopener">Website</a>` : ''}
+    <article class="comp-card">
+      ${img}
+      <div class="comp-body">
+        <div style="font-weight:700">${c.name}</div>
+        <div style="color:#a9b3ad;font-size:13px">${c.address||''}</div>
+        <div style="margin-top:6px">⭐ ${stars} · ${revs} reviews</div>
+        ${links}
       </div>
-    </div>
-  </div>`;
+    </article>`;
 }
 
-async function fetchCompetitors() {
-  competitorsBox.innerHTML = '<div class="muted">Finding nearby competitors…</div>';
+async function fetchCompetitors({ placeId, businessType, serviceArea }){
   setBusy(true);
-  try {
+  try{
+    if (competitorsBox) competitorsBox.innerHTML = `<div style="color:#a9b3ad">Loading competitors…</div>`;
     const body = {
-      placeId: LAST_PLACE_ID || undefined,
-      businessType: readBizType(),
-      serviceArea: area.value.trim(),
-      useGemini: false  // keep ToS-safe; enable if you add robots-aware site/review text later
+      placeId: placeId || undefined,
+      businessType: (businessType || readTrade()),
+      serviceArea: (serviceArea || areaInput?.value || '').trim(),
+      limit: 6,
+      useGemini: false
     };
     const json = await post('/api/competitive-snapshot', body);
-    console.log('competitive-snapshot', json);
+    console.log('[competitive-snapshot]', json);
 
-    if (!json?.success) {
-      competitorsBox.innerHTML = '<div class="muted">Could not load competitors.</div>';
+    if (!json?.success){
+      competitorsBox.innerHTML = `<div style="color:#a9b3ad">Couldn’t load competitors.</div>`;
       return;
     }
-    if (!Array.isArray(json.competitors) || !json.competitors.length) {
-      competitorsBox.innerHTML = '<div class="muted">No competitors found for this area.</div>';
+    const list = Array.isArray(json.competitors) ? json.competitors : [];
+    if (!list.length){
+      competitorsBox.innerHTML = `<div style="color:#a9b3ad">No trade-matched competitors found. Try a nearby city or broader service area.</div>`;
       return;
     }
-    competitorsBox.innerHTML = json.competitors.map(compCard).join('');
-  } finally {
+    competitorsBox.innerHTML = list.map(compCardHTML).join('');
+  } catch(e){
+    console.error(e);
+    competitorsBox.innerHTML = `<div style="color:#a9b3ad">Error loading competitors.</div>`;
+  } finally{
     setBusy(false);
   }
 }
-showCompetitorsBtn.addEventListener('click', fetchCompetitors);
 
-// ---------- Optional: auto-bias competitor search after analyze ----------
-window.addEventListener('load', () => {
-  // For demos you could auto-run analyze() here.
+/* ---------- wire up ---------- */
+btnAnalyze?.addEventListener('click', e => { e.preventDefault(); analyze(); });
+btnCompetitors?.addEventListener('click', e => {
+  e.preventDefault();
+  fetchCompetitors({
+    placeId: lastPlaceId,
+    businessType: readTrade(),
+    serviceArea: (areaInput?.value || '').trim()
+  });
 });
+btnTop?.addEventListener('click', e => {
+  e.preventDefault();
+  fetchCompetitors({
+    placeId: lastPlaceId, // still bias to your business if we have it
+    businessType: readTrade(),
+    serviceArea: (areaInput?.value || '').trim()
+  });
+});
+
+/* Optional: create a favicon link to avoid console noise if you didn’t ship one */
+(function ensureFavicon(){
+  if (!document.querySelector('link[rel="icon"]')) {
+    const l = document.createElement('link');
+    l.rel = 'icon'; l.href = '/favicon.ico';
+    document.head.appendChild(l);
+  }
+})();
