@@ -7,7 +7,6 @@
    - Full helper fallbacks
    - Accessible clarifications
    ============================================================== */
-
 const $ = id => document.getElementById(id);
 const API = path => (window.LVA_API_BASE || "") + path;
 
@@ -25,12 +24,19 @@ function setText(id, text) {
 }
 
 async function fetchWithTimeout(resource, options = {}, timeoutMs = 15000) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
-    return await fetch(resource, { ...options, signal: ctrl.signal });
+    const response = await fetch(resource, {
+      ...options,
+      signal: controller.signal
+    });
+    return response;
+  } catch (error) {
+    throw error;
   } finally {
-    clearTimeout(t);
+    clearTimeout(timeoutId);
   }
 }
 
@@ -53,8 +59,7 @@ function deriveBusinessType(trade) {
   if (p.has("area")) $("area").value = p.get("area");
   if (p.has("name")) $("bName").value = p.get("name");
   if (p.has("url")) $("webUrl").value = normUrlMaybe(p.get("url"));
-
-  // Auto-enable Fast mode if no website (UX win)
+  // Auto-enable Fast mode if no website
   if (!$("webUrl").value.trim()) $("fast").checked = true;
 })();
 
@@ -72,39 +77,42 @@ function renderClarificationsFlex(clar) {
   const wrap = $("clarWrap");
   const msgEl = $("clarMsg");
   const list = $("clarList");
+  clearClarifications();
 
-  clearClarifications(); // safety
-
-  // Normalize: {message,candidates} OR array of objects
+  // Normalize input
   const clarArr = Array.isArray(clar) ? clar : [clar || {}];
-  const msgs = [];
+  const messages = [];
   let candidates = [];
 
   clarArr.forEach(item => {
-    if (item?.message) msgs.push(item.message);
-    if (Array.isArray(item?.candidates)) candidates = candidates.concat(item.candidates);
+    if (item?.message) messages.push(item.message);
+    if (Array.isArray(item?.candidates)) {
+      candidates = candidates.concat(item.candidates);
+    }
   });
 
-  // Accessibility: announce changes
+  // Show message
   if (msgEl) {
-    msgEl.textContent = msgs.join(" ") || "Multiple matches found.";
+    const msg = messages.length ? messages.join(" ") : "Multiple matches found. Please select one.";
+    msgEl.textContent = msg;
     msgEl.setAttribute("aria-live", "polite");
   }
 
+  // Render up to 8 candidates
   candidates.slice(0, 8).forEach(c => {
     const btn = document.createElement("button");
     btn.className = "clar-btn";
-    btn.textContent = `${c.name || "Unnamed"} — ${c.formatted_address || ""}`;
+    btn.textContent = `${c.name || "Unnamed"} — ${c.formatted_address || "No address"}`;
     btn.onclick = () => analyzeWithPlaceId(c.place_id, c.name, c.formatted_address);
     btn.setAttribute("aria-label", `Select ${c.name}`);
     list?.appendChild(btn);
   });
 
+  // No matches hint
   if (candidates.length === 0) {
     const hint = document.createElement("div");
     hint.className = "clar-hint";
-    hint.textContent =
-      "No exact matches. Try adding a city/state, shortening the name, or using the website URL.";
+    hint.textContent = "No exact matches. Try adding city/state, shortening the name, or using the website URL.";
     list?.appendChild(hint);
   }
 
@@ -146,26 +154,27 @@ async function analyze() {
   $("mapEmbedWrap").style.display = "none";
 
   try {
-    const res = await fetchWithTimeout(
-      API("/api/analyze"),
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      15000
-    );
+    const res = await fetchWithTimeout(API("/api/analyze"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 15000);
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`HTTP ${res.status}: ${err}`);
+    }
+
     const data = await res.json();
 
     if (!data.success) {
-      setText("details", `Error: ${data.error || "Unknown"}`);
+      setText("details", `Error: ${data.error || "Unknown error"}`);
       disableButtons(false);
       return;
     }
 
     if (data.clarifications) {
       renderClarificationsFlex(data.clarifications);
-      setText("details", `Clarification needed:\n${JSON.stringify(data.clarifications, null, 2)}`);
       disableButtons(false);
       return;
     }
@@ -173,8 +182,10 @@ async function analyze() {
     renderScoring(data);
     lastPlaceId = data.placeId || null;
     await competitors(lastPlaceId, body.tradeSelect, body.serviceArea);
+
   } catch (e) {
-    setText("details", `Request failed: ${e.name === "AbortError" ? "Timed out" : e.message}`);
+    const msg = e.name === "AbortError" ? "Request timed out." : e.message;
+    setText("details", `Request failed: ${msg}`);
   } finally {
     disableButtons(false);
   }
@@ -193,6 +204,7 @@ async function analyzeWithPlaceId(placeId, name, address) {
     placeId,
     businessType: deriveBusinessType($("tradeSelect").value.trim()),
   };
+
   if (body.websiteUrl) body.websiteUrl = normUrlMaybe(body.websiteUrl);
 
   setText("details", "Analyzing selected place…");
@@ -200,15 +212,17 @@ async function analyzeWithPlaceId(placeId, name, address) {
   $("mapEmbedWrap").style.display = "none";
 
   try {
-    const res = await fetchWithTimeout(
-      API("/api/analyze"),
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      15000
-    );
+    const res = await fetchWithTimeout(API("/api/analyze"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 15000);
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`HTTP ${res.status}: ${err}`);
+    }
+
     const data = await res.json();
 
     if (!data.success) {
@@ -219,8 +233,10 @@ async function analyzeWithPlaceId(placeId, name, address) {
     renderScoring(data);
     lastPlaceId = data.placeId || placeId || null;
     await competitors(lastPlaceId, $("tradeSelect").value.trim(), $("area").value.trim());
+
   } catch (e) {
-    setText("details", `Request failed: ${e.name === "AbortError" ? "Timed out" : e.message}`);
+    const msg = e.name === "AbortError" ? "Request timed out." : e.message;
+    setText("details", `Request failed: ${msg}`);
   } finally {
     disableButtons(false);
   }
@@ -233,13 +249,10 @@ function renderScoring(data) {
   setText("modeBadge", data.mode || "—");
 
   const ds = data.detailedScores || {};
-
   setBar("barSeo", ds["On-Page SEO"] ?? data.seo ?? 0);
   setText("valSeo", ds["On-Page SEO"] ?? data.seo ?? "—");
-
   setBar("barCta", ds["Call-to-Action Strength"] ?? data.cta ?? 0);
   setText("valCta", ds["Call-to-Action Strength"] ?? data.cta ?? "—");
-
   setBar("barGbp", ds["Overall Rating"] ?? data.gbp ?? 0);
   setText("valGbp", ds["Overall Rating"] ?? data.gbp ?? "—");
 
@@ -252,7 +265,7 @@ function renderScoring(data) {
 
   if (data.mapEmbedUrl) {
     $("mapEmbed").src = data.mapEmbedUrl;
-    $("mapEmbedWrap").style.display = "";
+    $("mapEmbedWrap").style.display = "block";
   } else {
     $("mapEmbedWrap").style.display = "none";
   }
@@ -275,22 +288,28 @@ async function competitors(placeId, trade, area) {
     setText("competitors", "Provide a trade or area (or run Analyze first).");
     return;
   }
+
   setText("competitors", "Fetching competitors…");
+
   try {
-    const res = await fetchWithTimeout(
-      API("/api/competitive-snapshot"),
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ placeId, trade, area }),
-      },
-      15000
-    );
+    const res = await fetchWithTimeout(API("/api/competitive-snapshot"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ placeId, trade, area }),
+    }, 15000);
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`HTTP ${res.status}: ${err}`);
+    }
+
     const data = await res.json();
+
     if (!data.success) {
       setText("competitors", `Error: ${data.error || "Unknown"}`);
       return;
     }
+
     const out = {
       query: data.queryUsed,
       biasedBy: data.biasedBy,
@@ -298,8 +317,10 @@ async function competitors(placeId, trade, area) {
       adIntel: data.adIntel,
     };
     setText("competitors", JSON.stringify(out, null, 2));
+
   } catch (e) {
-    setText("competitors", `Request failed: ${e.name === "AbortError" ? "Timed out" : e.message}`);
+    const msg = e.name === "AbortError" ? "Timed out" : e.message;
+    setText("competitors", `Request failed: ${msg}`);
   }
 }
 
