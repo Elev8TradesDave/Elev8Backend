@@ -1,10 +1,10 @@
 /* ==============================================================
-   widget.js – FINAL POLISHED (r3)
-   - Clarification array/object support
-   - Competitors via backend Maps API
-   - Trade → businessType mapping
-   - Prefer detailedScores; graceful fallbacks
-   - Stronger hint when no candidates returned
+   widget.js — FINAL
+   - Clarifications: supports object OR array
+   - Competitors: Maps Text Search + Details via backend
+   - Trade mapping -> businessType (for server-side heuristics)
+   - Uses data.detailedScores when present
+   - Helpful no-match hint
    ============================================================== */
 const $ = id => document.getElementById(id);
 const API = path => (window.LVA_API_BASE || "") + path;
@@ -16,33 +16,28 @@ function setBar(id, value) {
   const v = Math.max(0, Math.min(100, Number(value) || 0));
   el.style.width = v + "%";
 }
-
 function setText(id, text) {
   const el = $(id);
   if (el) el.textContent = (text ?? "").toString();
 }
-
 async function fetchWithTimeout(resource, options = {}, timeoutMs = 15000) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(resource, { ...options, signal: controller.signal });
-    return response;
+    return await fetch(resource, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timeoutId);
   }
 }
-
 function normUrlMaybe(u) {
   if (!u) return "";
   const s = u.trim();
   return /^https?:\/\//i.test(s) ? s : "https://" + s;
 }
-
 function deriveBusinessType(trade) {
   const t = (trade || "").toLowerCase().trim();
-  const specialty = ["roofing", "plumbing", "electrical", "hvac", "hvac (repair)", "hvac (install)", "masonry"];
-  return specialty.some(k => t.includes(k.replace(/\s*\(.*?\)\s*/g, ""))) ? "specialty" : "maintenance";
+  const specialty = ["roofing", "plumbing", "electrical", "hvac", "hvac (repair)", "hvac (install)"];
+  return specialty.some(x => t.includes(x.split(" ")[0])) ? "specialty" : "maintenance";
 }
 
 /* ------------------- Prefill from URL (QR, ads) ---------------- */
@@ -52,46 +47,35 @@ function deriveBusinessType(trade) {
   if (p.has("area")) $("area").value = p.get("area");
   if (p.has("name")) $("bName").value = p.get("name");
   if (p.has("url")) $("webUrl").value = normUrlMaybe(p.get("url"));
-  if (!$("webUrl").value.trim()) $("fast").checked = true; // Auto-fast if no site
+  // Auto-enable Fast mode if no website
+  if (!$("webUrl").value.trim()) $("fast").checked = true;
 })();
 
 /* ------------------- Clarification UI (Flexible) --------------- */
 function clearClarifications() {
-  const wrap = $("clarWrap");
-  const msgEl = $("clarMsg");
-  const list = $("clarList");
-  wrap?.classList.remove("show");
-  if (msgEl) msgEl.textContent = "";
-  if (list) list.innerHTML = "";
+  $("clarWrap")?.classList.remove("show");
+  setText("clarMsg", "");
+  $("clarList") && ( $("clarList").innerHTML = "" );
+  setText("clarHint", "");
 }
-
-function renderClarificationsFlex(clarInput) {
+function renderClarificationsFlex(clar) {
   const wrap = $("clarWrap");
-  const msgEl = $("clarMsg");
   const list = $("clarList");
   clearClarifications();
 
-  // Accept object or array; flatten to {message[], candidates[]}
-  const clarArr = Array.isArray(clarInput) ? clarInput : [clarInput || {}];
+  const clarArr = Array.isArray(clar) ? clar : [clar || {}];
+
+  // Merge possible multiple payloads
   const messages = [];
   let candidates = [];
-
-  for (const item of clarArr) {
+  clarArr.forEach(item => {
     if (item?.message) messages.push(item.message);
     if (Array.isArray(item?.candidates)) candidates = candidates.concat(item.candidates);
-  }
+  });
 
-  // Message
-  if (msgEl) {
-    const msg = messages.length
-      ? messages.join(" ")
-      : (candidates.length ? "Multiple matches found. Please select one." : "No exact matches.");
-    msgEl.textContent = msg;
-    msgEl.setAttribute("aria-live", "polite");
-  }
+  setText("clarMsg", messages.length ? messages.join(" ") : "Multiple matches found. Please select one.");
 
-  // Candidates (max 8)
-  (candidates || []).slice(0, 8).forEach(c => {
+  candidates.slice(0, 8).forEach(c => {
     const btn = document.createElement("button");
     btn.className = "clar-btn";
     btn.textContent = `${c.name || "Unnamed"} — ${c.formatted_address || "No address"}`;
@@ -100,13 +84,8 @@ function renderClarificationsFlex(clarInput) {
     list?.appendChild(btn);
   });
 
-  // Stronger hint when empty
-  if (!candidates || candidates.length === 0) {
-    const hint = document.createElement("div");
-    hint.className = "clar-hint";
-    hint.textContent =
-      "No exact matches. Try adding a city/state, shortening the name, pasting the website URL, or trying a broader search (e.g., just the brand + state).";
-    list?.appendChild(hint);
+  if (candidates.length === 0) {
+    setText("clarHint", "No exact matches. Try adding city/state, shortening the name, pasting the website URL, or trying a broader search (e.g., just the brand + state).");
   }
 
   wrap?.classList.add("show");
@@ -136,7 +115,7 @@ async function analyze() {
   if (body.websiteUrl) body.websiteUrl = normUrlMaybe(body.websiteUrl);
   body.businessType = deriveBusinessType(body.tradeSelect);
 
-  if (!body.businessName) {
+  if (!body.businessName && !lastPlaceId) {
     setText("details", "Please enter a business name.");
     disableButtons(false);
     return;
@@ -151,29 +130,29 @@ async function analyze() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, 15000);
+    }, 18000);
 
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const data = await res.json();
 
-    if (!data.success) {
+    if (!res.ok || !data.success) {
       setText("details", `Error: ${data.error || "Unknown error"}`);
+      disableButtons(false);
       return;
     }
 
     if (data.clarifications) {
       renderClarificationsFlex(data.clarifications);
+      disableButtons(false);
       return;
     }
 
     renderScoring(data);
     lastPlaceId = data.placeId || null;
-
-    // Real competitor search via backend (Maps TextSearch/Details)
     await competitors(lastPlaceId, body.tradeSelect, body.serviceArea);
 
   } catch (e) {
-    setText("details", `Request failed: ${e.name === "AbortError" ? "Request timed out." : e.message}`);
+    const msg = e.name === "AbortError" ? "Request timed out." : e.message;
+    setText("details", `Request failed: ${msg}`);
   } finally {
     disableButtons(false);
   }
@@ -192,6 +171,7 @@ async function analyzeWithPlaceId(placeId, name, address) {
     placeId,
     businessType: deriveBusinessType($("tradeSelect").value.trim()),
   };
+
   if (body.websiteUrl) body.websiteUrl = normUrlMaybe(body.websiteUrl);
 
   setText("details", "Analyzing selected place…");
@@ -203,12 +183,11 @@ async function analyzeWithPlaceId(placeId, name, address) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, 15000);
+    }, 18000);
 
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const data = await res.json();
 
-    if (!data.success) {
+    if (!res.ok || !data.success) {
       setText("details", `Error: ${data.error || "Unknown"}`);
       return;
     }
@@ -218,7 +197,8 @@ async function analyzeWithPlaceId(placeId, name, address) {
     await competitors(lastPlaceId, $("tradeSelect").value.trim(), $("area").value.trim());
 
   } catch (e) {
-    setText("details", `Request failed: ${e.name === "AbortError" ? "Request timed out." : e.message}`);
+    const msg = e.name === "AbortError" ? "Request timed out." : e.message;
+    setText("details", `Request failed: ${msg}`);
   } finally {
     disableButtons(false);
   }
@@ -226,26 +206,23 @@ async function analyzeWithPlaceId(placeId, name, address) {
 
 /* ----------------------- Render Scoring ----------------------- */
 function renderScoring(data) {
-  // Prefer detailedScores if present
-  const ds = data.detailedScores || {};
-  const seoVal = (ds["On-Page SEO"] ?? data.seo ?? 0);
-  const ctaVal = (ds["Call-to-Action Strength"] ?? data.cta ?? 0);
-  const gbpVal = (ds["Overall Rating"] ?? data.gbp ?? 0);
-  const reviewsDial = (ds["Review Volume"] ?? data?.dials?.reviews ?? null);
-  const painDial = (ds["Pain Point Resonance"] ?? data?.dials?.pain ?? null);
-
   setBar("overallBar", data.finalScore || 0);
   setText("overallPct", (data.finalScore ?? "—") + " / 100");
   setText("modeBadge", data.mode || "—");
 
-  setBar("barSeo", seoVal);  setText("valSeo", seoVal ?? "—");
-  setBar("barCta", ctaVal);  setText("valCta", ctaVal ?? "—");
-  setBar("barGbp", gbpVal);  setText("valGbp", gbpVal ?? "—");
+  const ds = data.detailedScores || {};
+  // Prefer detailedScores if provided, otherwise fall back to top-level
+  const seo = ds["On-Page SEO"] ?? data.seo ?? 0;
+  const cta = ds["Call-to-Action Strength"] ?? data.cta ?? 0;
+  const gbp = ds["Overall Rating"] ?? data.gbp ?? 0;
+  const reviews = ds["Review Volume"] ?? data?.dials?.reviews ?? 0;
+  const pain = ds["Pain Point Resonance"] ?? data?.dials?.pain ?? 0;
 
-  setBar("barReviews", reviewsDial || 0);
-  setText("valReviews", reviewsDial ?? "—");
-  setBar("barPain", painDial || 0);
-  setText("valPain", painDial ?? "—");
+  setBar("barSeo", seo); setText("valSeo", seo || "—");
+  setBar("barCta", cta); setText("valCta", cta || "—");
+  setBar("barGbp", gbp); setText("valGbp", gbp || "—");
+  setBar("barReviews", reviews); setText("valReviews", reviews || "—");
+  setBar("barPain", pain); setText("valPain", pain || "—");
 
   if (data.mapEmbedUrl) {
     $("mapEmbed").src = data.mapEmbedUrl;
@@ -282,10 +259,9 @@ async function competitors(placeId, trade, area) {
       body: JSON.stringify({ placeId, trade, area }),
     }, 15000);
 
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const data = await res.json();
 
-    if (!data.success) {
+    if (!res.ok || !data.success) {
       setText("competitors", `Error: ${data.error || "Unknown"}`);
       return;
     }
@@ -297,9 +273,9 @@ async function competitors(placeId, trade, area) {
       adIntel: data.adIntel,
     };
     setText("competitors", JSON.stringify(out, null, 2));
-
   } catch (e) {
-    setText("competitors", `Request failed: ${e.name === "AbortError" ? "Timed out" : e.message}`);
+    const msg = e.name === "AbortError" ? "Timed out" : e.message;
+    setText("competitors", `Request failed: ${msg}`);
   }
 }
 

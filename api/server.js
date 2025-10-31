@@ -1,4 +1,3 @@
-
 /**
  * Elev8Trades Backend — Local Visibility Audit
  * Adaptive, trade-aware SEO/CTA/GBP scoring (Render-friendly)
@@ -12,7 +11,6 @@
  *   ENABLE_AD_SCRAPE=false
  */
 
-"use strict";
 require("dotenv").config();
 
 const path = require("path");
@@ -20,8 +18,8 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
-const compression = require("compression");      // optional DX
-const morgan = require("morgan");                // optional DX
+const compression = require("compression");
+const morgan = require("morgan");
 const { Client } = require("@googlemaps/google-maps-services-js");
 const cheerio = require("cheerio");
 
@@ -45,10 +43,10 @@ app.use(
         "default-src": ["'self'"],
         "script-src": ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
         "style-src": ["'self'", "'unsafe-inline'"],
-        // allow Google Maps assets used by the embed
+        // allow Google Maps assets used by the embed (images, tiles, etc.)
         "img-src": ["'self'", "data:", "https:", "http:", "https://maps.gstatic.com", "https://maps.googleapis.com"],
         "frame-src": ["'self'", "https://www.google.com"],
-        "connect-src": ["'self'"], // browser -> same origin only
+        "connect-src": ["'self'"],
       },
     },
     crossOriginEmbedderPolicy: false,
@@ -78,6 +76,9 @@ app.use(
 // Serve widget (static) from repo root so /widget.html works
 app.use(express.static(path.join(__dirname, "..")));
 
+// Silence favicon 404s (Chrome devtools, etc.)
+app.get("/favicon.ico", (req, res) => res.status(204).end());
+
 // ---------- Tiny in-memory cache (5 min default) ----------
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const cache = new Map(); // key -> { data, expires }
@@ -96,19 +97,15 @@ function cacheSet(key, data, ttl = CACHE_TTL_MS) {
 }
 
 // ---------- Google Maps ----------
-const gmaps = new Client({});
+const gmaps = new Client();
 
-/**
- * IMPORTANT: call client methods by name so `this` stays bound.
- * (Passing the method reference loses `this` -> axiosInstance undefined)
- */
-async function mapsCall(methodName, args, timeoutMs = 8000) {
+async function mapsCall(fn, args, timeoutMs = 8000) {
   try {
-    const res = await gmaps[methodName]({ timeout: timeoutMs, ...args });
+    const res = await fn({ timeout: timeoutMs, ...args });
     return { ok: true, data: res.data };
   } catch (err) {
     const payload = err?.response?.data || err?.message || "Maps error";
-    console.error(`Maps error (${methodName}):`, payload);
+    console.error("Maps error:", payload);
     return { ok: false, error: payload };
   }
 }
@@ -196,10 +193,12 @@ function scoreCTA({ $, placePhone, placeHours }) {
 
   // Contact paths
   const CTA_WORDS = ["call", "quote", "estimate", "book", "schedule", "contact", "get started", "free estimate"];
-  const ctaNodes = $("a,button").filter((_, el) => {
-    const t = $(el).text().toLowerCase().trim();
-    return CTA_WORDS.some((w) => t.includes(w));
-  }).length;
+  const ctaNodes = $("a,button")
+    .filter((_, el) => {
+      const t = $(el).text().toLowerCase().trim();
+      return CTA_WORDS.some((w) => t.includes(w));
+    })
+    .length;
   if (ctaNodes >= 1) {
     pts += 15;
     breakdown.contactPaths += 15;
@@ -385,30 +384,29 @@ function tradeToQuery(trade) {
   if (t.includes("electric")) return "electrician";
   if (t.includes("landscap")) return "landscaping";
   if (t.includes("mason")) return "masonry contractor";
-  return (t || "contractor");
+  return t || "contractor";
 }
 
 // ---------- Routes ----------
 app.get("/api/health", (req, res) => {
-  const envOk = !!(GOOGLE_MAPS_API_KEY_SERVER && GOOGLE_MAPS_EMBED_KEY);
+  const hasServerKey = !!GOOGLE_MAPS_API_KEY_SERVER;
+  const hasEmbedKey = !!GOOGLE_MAPS_EMBED_KEY;
   res.json({
     ok: true,
     env: NODE_ENV,
     adsEnabled: false,
-    keysReady: envOk,
-    hasServerKey: !!GOOGLE_MAPS_API_KEY_SERVER,
-    hasEmbedKey: !!GOOGLE_MAPS_EMBED_KEY
+    keysReady: hasServerKey && hasEmbedKey,
+    hasServerKey,
+    hasEmbedKey,
   });
 });
 
+// Robust analyze with Text Search fallback + clarifications
 app.post("/api/analyze", async (req, res) => {
   try {
     const { businessName, websiteUrl, serviceArea, tradeSelect, fast, placeId: forcedPlaceId } = req.body || {};
     if (!businessName && !forcedPlaceId) {
       return res.status(400).json({ success: false, error: "Missing businessName or placeId" });
-    }
-    if (!GOOGLE_MAPS_API_KEY_SERVER) {
-      return res.status(500).json({ success: false, error: "Missing GOOGLE_MAPS_API_KEY_SERVER" });
     }
 
     let placeId = forcedPlaceId || null;
@@ -421,30 +419,89 @@ app.post("/api/analyze", async (req, res) => {
           input: serviceArea ? `${businessName} ${serviceArea}` : businessName,
           inputtype: "textquery",
           fields: ["place_id", "name", "formatted_address"],
+          language: "en",
+          region: "us",
         },
       };
-      const findRes = await mapsCall("findPlaceFromText", findArgs);
-      if (!findRes.ok) return res.status(500).json({ success: false, error: `findPlaceFromText failed: ${findRes.error}` });
+      const findRes = await mapsCall(gmaps.findPlaceFromText, findArgs);
+      if (!findRes.ok) {
+        return res.status(500).json({ success: false, error: `findPlaceFromText failed: ${findRes.error}` });
+      }
 
-      const cands = findRes.data?.candidates || [];
+      let cands = findRes.data?.candidates || [];
+
+      // ---------- Fallback to Text Search if no candidates ----------
       if (!cands.length) {
-        return res.json({ success: true, clarifications: { reason: "NO_MATCH", message: "No matching place found.", candidates: [] } });
-      }
-      if (cands.length > 1) {
-        return res.json({
-          success: true,
-          clarifications: {
-            reason: "MULTI_MATCH",
-            message: "Multiple matches found; please pick one.",
-            candidates: cands.slice(0, 8).map((c) => ({
-              place_id: c.place_id,
-              name: c.name,
-              formatted_address: c.formatted_address,
-            })),
+        const q = serviceArea ? `${businessName} ${serviceArea}` : businessName;
+        const tsArgs = {
+          params: {
+            key: GOOGLE_MAPS_API_KEY_SERVER,
+            query: q,
+            type: "establishment",
+            language: "en",
+            region: "us",
           },
-        });
+        };
+        const tsRes = await mapsCall(gmaps.textSearch, tsArgs);
+        if (tsRes.ok) {
+          const ts = tsRes.data?.results || [];
+          if (ts.length) {
+            const clar = ts.slice(0, 8).map((r) => ({
+              place_id: r.place_id,
+              name: r.name,
+              formatted_address: r.formatted_address || r.vicinity || "",
+            }));
+            if (clar.length === 1) {
+              placeId = clar[0].place_id;
+            } else {
+              return res.json({
+                success: true,
+                clarifications: {
+                  reason: "MULTI_MATCH",
+                  message: "Multiple matches found (via text search); please pick one.",
+                  candidates: clar,
+                },
+              });
+            }
+          } else {
+            return res.json({
+              success: true,
+              clarifications: {
+                reason: "NO_MATCH",
+                message: "No matching place found (name search + text search).",
+                candidates: [],
+              },
+            });
+          }
+        } else {
+          return res.json({
+            success: true,
+            clarifications: {
+              reason: "NO_MATCH",
+              message: "No matching place found. Try adding city/state, shortening the name, or pasting the website URL.",
+              candidates: [],
+            },
+          });
+        }
       }
-      placeId = cands[0].place_id;
+
+      if (!placeId) {
+        if (cands.length > 1) {
+          return res.json({
+            success: true,
+            clarifications: {
+              reason: "MULTI_MATCH",
+              message: "Multiple matches found; please pick one.",
+              candidates: cands.slice(0, 5).map((c) => ({
+                place_id: c.place_id,
+                name: c.name,
+                formatted_address: c.formatted_address,
+              })),
+            },
+          });
+        }
+        placeId = cands[0].place_id;
+      }
     }
 
     // 2) Place details for scoring (cached)
@@ -469,10 +526,14 @@ app.post("/api/analyze", async (req, res) => {
             "geometry",
             "opening_hours.open_now",
           ],
+          language: "en",
+          region: "us",
         },
       };
-      const detailsRes = await mapsCall("placeDetails", detailsArgs);
-      if (!detailsRes.ok) return res.status(500).json({ success: false, error: `placeDetails failed: ${detailsRes.error}`, placeId });
+      const detailsRes = await mapsCall(gmaps.placeDetails, detailsArgs);
+      if (!detailsRes.ok) {
+        return res.status(500).json({ success: false, error: `placeDetails failed: ${detailsRes.error}`, placeId });
+      }
       details = detailsRes.data?.result || {};
       cacheSet(detailsKey, details);
     }
@@ -508,19 +569,14 @@ app.post("/api/analyze", async (req, res) => {
 
     if (hasSiteSignals) {
       const weights = pickWeights(tradeSelect, emergencyMode);
-      // Smart modifiers
       const totalReviews = details?.user_ratings_total || 0;
       const gbpAdjFactor = totalReviews < 10 ? 0.7 : 1.0;
 
-      // Blend
       finalScore = Math.round(
         (weights.seo * seo) + (weights.cta * cta) + (weights.gbp * gbp * gbpAdjFactor)
       );
 
-      // Bonuses
       if (totalReviews >= 200) finalScore = clamp(finalScore + 2, 0, 100);
-
-      // Very strong CTA: tel + ≥2 CTA buttons + a form → +3
       if (ctaBreakdown?.directCall >= 25 && ctaBreakdown?.contactPaths >= 20) {
         finalScore = clamp(finalScore + 3, 0, 100);
       }
@@ -561,7 +617,7 @@ app.post("/api/analyze", async (req, res) => {
     res.status(500).json({
       success: false,
       error: "Internal server error",
-      details: err?.message || String(err),
+      details: err.message,
     });
   }
 });
@@ -569,9 +625,6 @@ app.post("/api/analyze", async (req, res) => {
 app.post("/api/competitive-snapshot", async (req, res) => {
   try {
     const { placeId, trade, area } = req.body || {};
-    if (!GOOGLE_MAPS_API_KEY_SERVER) {
-      return res.status(500).json({ success: false, error: "Missing GOOGLE_MAPS_API_KEY_SERVER" });
-    }
 
     // Optional geometry bias from place
     let locationBias = null;
@@ -579,8 +632,8 @@ app.post("/api/competitive-snapshot", async (req, res) => {
       const dKey = `geom:${placeId}`;
       let geom = cacheGet(dKey);
       if (!geom) {
-        const dRes = await mapsCall("placeDetails", {
-          params: { key: GOOGLE_MAPS_API_KEY_SERVER, place_id: placeId, fields: ["geometry", "name"] },
+        const dRes = await mapsCall(gmaps.placeDetails, {
+          params: { key: GOOGLE_MAPS_API_KEY_SERVER, place_id: placeId, fields: ["geometry", "name"], language: "en", region: "us" },
         });
         if (dRes.ok) {
           const g = dRes.data?.result?.geometry?.location;
@@ -597,14 +650,17 @@ app.post("/api/competitive-snapshot", async (req, res) => {
     const tsKey = `textsearch:${query}:${locationBias ? `${locationBias.lat},${locationBias.lng}` : "x"}`;
     let basics = cacheGet(tsKey);
     if (!basics) {
-      const tsRes = await mapsCall("textSearch", {
+      const tsArgs = {
         params: {
           key: GOOGLE_MAPS_API_KEY_SERVER,
           query,
           type: "establishment",
+          language: "en",
+          region: "us",
           ...(locationBias ? { location: locationBias, radius: 15000 } : {}),
         },
-      });
+      };
+      const tsRes = await mapsCall(gmaps.textSearch, tsArgs);
       if (!tsRes.ok) return res.status(500).json({ success: false, error: `textSearch failed: ${tsRes.error}` });
       basics = (tsRes.data?.results || []).slice(0, 10);
       cacheSet(tsKey, basics);
@@ -615,11 +671,13 @@ app.post("/api/competitive-snapshot", async (req, res) => {
       const eKey = `details:${b.place_id}`;
       let r = cacheGet(eKey);
       if (!r) {
-        const dRes = await mapsCall("placeDetails", {
+        const dRes = await mapsCall(gmaps.placeDetails, {
           params: {
             key: GOOGLE_MAPS_API_KEY_SERVER,
             place_id: b.place_id,
             fields: ["place_id", "name", "formatted_address", "rating", "user_ratings_total", "photos", "website"],
+            language: "en",
+            region: "us",
           },
         });
         if (dRes.ok) {
@@ -655,7 +713,7 @@ app.post("/api/competitive-snapshot", async (req, res) => {
     res.status(500).json({
       success: false,
       error: "Failed to fetch competitors",
-      details: err?.message || String(err),
+      details: err.message,
     });
   }
 });
