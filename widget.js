@@ -1,312 +1,180 @@
-/* ==============================================================
-   widget.js — FINAL
-   - Clarifications: supports object OR array
-   - Competitors: Maps Text Search + Details via backend
-   - Trade mapping -> businessType (for server-side heuristics)
-   - Uses data.detailedScores when present
-   - Helpful no-match hint
-   - NEW: placeId URL param support (+ ?auto=1 autorun)
-   ============================================================== */
-const $ = id => document.getElementById(id);
-const API = path => (window.LVA_API_BASE || "") + path;
+// ---------- Helpers ----------
+function $(id) { return document.getElementById(id); }
 
-/* --------------------------- Helpers --------------------------- */
-function setBar(id, value) {
-  const el = $(id);
-  if (!el) return;
-  const v = Math.max(0, Math.min(100, Number(value) || 0));
-  el.style.width = v + "%";
-}
-function setText(id, text) {
-  const el = $(id);
-  if (el) el.textContent = (text ?? "").toString();
-}
-async function fetchWithTimeout(resource, options = {}, timeoutMs = 15000) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(resource, { ...options, signal: controller.signal });
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-function normUrlMaybe(u) {
-  if (!u) return "";
-  const s = u.trim();
-  return /^https?:\/\//i.test(s) ? s : "https://" + s;
-}
-function deriveBusinessType(trade) {
-  const t = (trade || "").toLowerCase().trim();
-  const specialty = ["roofing", "plumbing", "electrical", "hvac", "hvac (repair)", "hvac (install)"];
-  return specialty.some(x => t.includes(x.split(" ")[0])) ? "specialty" : "maintenance";
+function banner(text, isError=false) {
+  const host = $("bannerHost");
+  if (!host) return;
+  host.innerHTML = "";
+  if (!text) return;
+  const el = document.createElement("div");
+  el.className = "banner" + (isError ? " error" : "");
+  el.textContent = text;
+  host.appendChild(el);
 }
 
-/* ------------------- Prefill from URL (QR, ads) ---------------- */
-(function prefillFromQuery() {
-  const p = new URLSearchParams(location.search);
-  if (p.has("trade")) $("tradeSelect").value = p.get("trade");
-  if (p.has("area")) $("area").value = p.get("area");
-  if (p.has("name")) $("bName").value = p.get("name");
-  if (p.has("url")) $("webUrl").value = normUrlMaybe(p.get("url"));
-  // Auto-enable Fast mode if no website
-  if (!$("webUrl").value.trim()) $("fast").checked = true;
-})();
-
-/* --- Prefill placeId & optional autorun from URL (NEW) -------- */
-(function prefillPlaceId() {
-  const p = new URLSearchParams(location.search);
-  const pid = p.get("placeId");
-  const auto = p.get("auto");
-  if (pid) {
-    // If name/area already typed/prefilled, show them in Details; else still fine.
-    const name = $("bName")?.value.trim();
-    const area = $("area")?.value.trim();
-    // Run immediately if auto=1, otherwise just set lastPlaceId and wait for user click.
-    if (auto) {
-      analyzeWithPlaceId(pid, name || "Selected business", area || "");
-      // brief lock to avoid double-submit if they also click
-      disableButtons(true);
-      setTimeout(() => disableButtons(false), 1200);
-    } else {
-      // Prime lastPlaceId so a normal Analyze will use it even without name
-      window.lastPlaceId = pid;
-    }
-  }
-})();
-
-/* ------------------- Clarification UI (Flexible) --------------- */
-function clearClarifications() {
-  $("clarWrap")?.classList.remove("show");
-  setText("clarMsg", "");
-  $("clarList") && ( $("clarList").innerHTML = "" );
-  setText("clarHint", "");
-}
-function renderClarificationsFlex(clar) {
-  const wrap = $("clarWrap");
-  const list = $("clarList");
-  clearClarifications();
-
-  const clarArr = Array.isArray(clar) ? clar : [clar || {}];
-
-  // Merge possible multiple payloads
-  const messages = [];
-  let candidates = [];
-  clarArr.forEach(item => {
-    if (item?.message) messages.push(item.message);
-    if (Array.isArray(item?.candidates)) candidates = candidates.concat(item.candidates);
-  });
-
-  setText("clarMsg", messages.length ? messages.join(" ") : "Multiple matches found. Please select one.");
-
-  candidates.slice(0, 8).forEach(c => {
-    const btn = document.createElement("button");
-    btn.className = "clar-btn";
-    btn.textContent = `${c.name || "Unnamed"} — ${c.formatted_address || "No address"}`;
-    btn.onclick = () => analyzeWithPlaceId(c.place_id, c.name, c.formatted_address);
-    btn.setAttribute("aria-label", `Select ${c.name}`);
-    list?.appendChild(btn);
-  });
-
-  if (candidates.length === 0) {
-    setText("clarHint", "No exact matches. Try adding city/state, shortening the name, pasting the website URL, or trying a broader search (e.g., just the brand + state).");
-  }
-
-  wrap?.classList.add("show");
+function setLoading(on) {
+  $("loading").style.display = on ? "block" : "none";
+  $("btnAnalyze").disabled = on;
 }
 
-/* ----------------------- Button Control ----------------------- */
-function disableButtons(disabled = true) {
-  $("btnAnalyze")?.toggleAttribute("disabled", disabled);
-  $("btnCompetitors")?.toggleAttribute("disabled", disabled);
+// ---------- Name variants (SAB) ----------
+function generateNameVariants(name) {
+  const n = (name || "").trim();
+  const set = new Set();
+  if (!n) return [];
+  const base = n
+    .replace(/\binc\.?\b/gi, "")
+    .replace(/\bllc\b/gi, "")
+    .replace(/\bco\.?\b/gi, "")
+    .replace(/\bcorp\.?\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  set.add(n);
+  set.add(base);
+  set.add(base.replace(/\ball\s*state\b/gi, "Allstate"));
+  set.add(base.replace(/\ballstate\b/gi, "All State"));
+  return Array.from(set).filter(Boolean);
 }
-
-/* -------------------------- Analysis -------------------------- */
-let lastPlaceId = null;
-
-async function analyze() {
-  clearClarifications();
-  disableButtons(true);
-
-  const body = {
-    businessName: $("bName").value.trim(),
-    websiteUrl: $("webUrl").value.trim(),
-    serviceArea: $("area").value.trim(),
-    tradeSelect: $("tradeSelect").value.trim(),
-    fast: $("fast").checked,
-  };
-
-  if (body.websiteUrl) body.websiteUrl = normUrlMaybe(body.websiteUrl);
-  body.businessType = deriveBusinessType(body.tradeSelect);
-
-  if (!body.businessName && !lastPlaceId) {
-    setText("details", "Please enter a business name.");
-    disableButtons(false);
-    return;
-  }
-
-  setText("details", "Analyzing…");
-  setText("competitors", "—");
-  $("mapEmbedWrap").style.display = "none";
-
-  try {
-    const res = await fetchWithTimeout(API("/api/analyze"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }, 18000);
-
-    const data = await res.json();
-
-    if (!res.ok || !data.success) {
-      setText("details", `Error: ${data.error || "Unknown error"}`);
-      disableButtons(false);
-      return;
-    }
-
-    if (data.clarifications) {
-      renderClarificationsFlex(data.clarifications);
-      disableButtons(false);
-      return;
-    }
-
-    renderScoring(data);
-    lastPlaceId = data.placeId || null;
-    await competitors(lastPlaceId, body.tradeSelect, body.serviceArea);
-
-  } catch (e) {
-    const msg = e.name === "AbortError" ? "Request timed out." : e.message;
-    setText("details", `Request failed: ${msg}`);
-  } finally {
-    disableButtons(false);
-  }
-}
-
-async function analyzeWithPlaceId(placeId, name, address) {
-  clearClarifications();
-  disableButtons(true);
-
-  const body = {
-    businessName: $("bName").value.trim() || name || "",
-    websiteUrl: $("webUrl").value.trim(),
-    serviceArea: $("area").value.trim() || address || "",
-    tradeSelect: $("tradeSelect").value.trim(),
-    fast: $("fast").checked,
-    placeId,
-    businessType: deriveBusinessType($("tradeSelect").value.trim()),
-  };
-
-  if (body.websiteUrl) body.websiteUrl = normUrlMaybe(body.websiteUrl);
-
-  setText("details", "Analyzing selected place…");
-  setText("competitors", "—");
-  $("mapEmbedWrap").style.display = "none";
-
-  try {
-    const res = await fetchWithTimeout(API("/api/analyze"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }, 18000);
-
-    const data = await res.json();
-
-    if (!res.ok || !data.success) {
-      setText("details", `Error: ${data.error || "Unknown"}`);
-      return;
-    }
-
-    renderScoring(data);
-    lastPlaceId = data.placeId || placeId || null;
-    await competitors(lastPlaceId, $("tradeSelect").value.trim(), $("area").value.trim());
-
-  } catch (e) {
-    const msg = e.name === "AbortError" ? "Request timed out." : e.message;
-    setText("details", `Request failed: ${msg}`);
-  } finally {
-    disableButtons(false);
-  }
-}
-
-/* ----------------------- Render Scoring ----------------------- */
-function renderScoring(data) {
-  setBar("overallBar", data.finalScore || 0);
-  setText("overallPct", (data.finalScore ?? "—") + " / 100");
-  setText("modeBadge", data.mode || "—");
-
-  const ds = data.detailedScores || {};
-  // Prefer detailedScores if provided, otherwise fall back to top-level
-  const seo = ds["On-Page SEO"] ?? data.seo ?? 0;
-  const cta = ds["Call-to-Action Strength"] ?? data.cta ?? 0;
-  const gbp = ds["Overall Rating"] ?? data.gbp ?? 0;
-  const reviews = ds["Review Volume"] ?? data?.dials?.reviews ?? 0;
-  const pain = ds["Pain Point Resonance"] ?? data?.dials?.pain ?? 0;
-
-  setBar("barSeo", seo); setText("valSeo", seo || "—");
-  setBar("barCta", cta); setText("valCta", cta || "—");
-  setBar("barGbp", gbp); setText("valGbp", gbp || "—");
-  setBar("barReviews", reviews); setText("valReviews", reviews || "—");
-  setBar("barPain", pain); setText("valPain", pain || "—");
-
-  if (data.mapEmbedUrl) {
-    $("mapEmbed").src = data.mapEmbedUrl;
-    $("mapEmbedWrap").style.display = "block";
+function populateAltNames() {
+  const sel = $("altNames");
+  sel.innerHTML = "";
+  const options = generateNameVariants($("bName").value);
+  if (options.length === 0) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = "—"; sel.appendChild(o);
   } else {
-    $("mapEmbedWrap").style.display = "none";
+    for (const opt of options) {
+      const o = document.createElement("option");
+      o.value = opt; o.textContent = opt; sel.appendChild(o);
+    }
   }
+}
+$("bName").addEventListener("input", populateAltNames);
+$("btnUseAlt").addEventListener("click", () => {
+  const v = $("altNames").value;
+  if (v) $("bName").value = v;
+});
+populateAltNames();
 
-  const det = {
-    placeId: data.placeId,
-    place: data.place,
-    mode: data.mode,
-    weightsUsed: data.weightsUsed,
-    seoBreakdown: data.seoBreakdown,
-    ctaBreakdown: data.ctaBreakdown,
-    detailedScores: ds,
-  };
-  setText("details", JSON.stringify(det, null, 2));
+// ---------- Candidate picker ----------
+function showCandidates(list) {
+  const box = $("candidateBox");
+  const sel = $("candidateSelect");
+  sel.innerHTML = "";
+  if (!list || !list.length) { box.style.display = "none"; return; }
+  for (const c of list) {
+    const o = document.createElement("option");
+    o.value = c.place_id;
+    o.textContent = `${c.name} — ${c.vicinity || c.formatted_address || ""}`.trim();
+    sel.appendChild(o);
+  }
+  box.style.display = "block";
+}
+$("btnUseCandidate").addEventListener("click", async () => {
+  const pid = $("candidateSelect").value;
+  if (!pid) return;
+  await runAnalyze({ placeId: pid });
+});
+
+// ---------- UI Mapping ----------
+function setWidth(id, v) { $(id).style.width = `${Math.max(0, Math.min(100, v||0))}%`; }
+
+function renderPlace(place) {
+  if (!place) { $("placeBlock").textContent = "—"; return; }
+  const lines = [];
+  if (place.name) lines.push(place.name);
+  if (place.address) lines.push(place.address);
+  if (place.rating != null) lines.push(`Rating: ${place.rating} (${place.user_ratings_total ?? 0})`);
+  if (place.website) lines.push(place.website);
+  $("placeBlock").textContent = lines.join(" • ");
 }
 
-/* ------------------------- Competitors ------------------------- */
-async function competitors(placeId, trade, area) {
-  if (!trade && !area && !placeId) {
-    setText("competitors", "Provide a trade or area (or run Analyze first).");
-    return;
-  }
+function renderBars(data) {
+  const gbp = data?.signals?.gbp || {};
+  const site = data?.signals?.site || {};
 
-  setText("competitors", "Fetching competitors…");
+  setWidth("bar-rating", gbp.ratingQuality);
+  setWidth("bar-volume", gbp.reviewVolume);
+  setWidth("bar-category", gbp.categoryMatch);
+  setWidth("bar-photos", gbp.photos);
+  setWidth("bar-hours", gbp.hours);
 
+  setWidth("bar-seo", site.seo);
+  setWidth("bar-cta", site.cta);
+
+  $("siteNote").textContent =
+    site?.reachable === false && data?.place?.website
+      ? "Website not reachable within time; blended path disabled."
+      : site?.checked ? "" : "No website checks were run.";
+}
+
+function renderMap(url) {
+  $("mapFrame").src = url || "";
+}
+
+function renderPathPill(pathOrStatus) {
+  const pill = $("pathPill");
+  pill.textContent = pathOrStatus || "—";
+}
+
+// ---------- Analyze ----------
+async function runAnalyze(overrides = {}) {
   try {
-    const res = await fetchWithTimeout(API("/api/competitive-snapshot"), {
+    banner("");
+    setLoading(true);
+    showCandidates(null);
+
+    const body = {
+      businessName: $("bName").value,
+      serviceArea: $("area").value,
+      businessType: $("tradeSelect").value,
+      websiteUrl: $("webUrl").value,
+      fast: $("fast").checked ? 1 : 0,
+      ...overrides,
+    };
+
+    const q = $("nocache").checked ? "?nocache=1" : "";
+    const res = await fetch("/api/analyze" + q, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ placeId, trade, area }),
-    }, 15000);
+      body: JSON.stringify(body)
+    });
 
     const data = await res.json();
 
-    if (!res.ok || !data.success) {
-      setText("competitors", `Error: ${data.error || "Unknown"}`);
+    if (!res.ok || data.success === false) {
+      banner(data?.message || "Request failed.", true);
+      setLoading(false);
       return;
     }
 
-    const out = {
-      query: data.queryUsed,
-      biasedBy: data.biasedBy,
-      competitors: data.competitors,
-      adIntel: data.adIntel,
-    };
-    setText("competitors", JSON.stringify(out, null, 2));
+    // Candidate suggestions
+    showCandidates(data?.debug?.ambiguous);
+
+    // Banners by status
+    if (data.status === "SITE_ONLY") {
+      banner("Provisional website-only score (no GBP found). Add/claim your GBP for a fuller score.");
+    } else if (data.status === "NEEDS_INPUT") {
+      banner("We couldn’t find a GBP and no website was provided. Add a website URL or create/claim your GBP, then re-run.");
+    } else {
+      banner("");
+    }
+
+    // Headline
+    $("finalScore").textContent = (data.finalScore ?? "—");
+    $("rationale").textContent = data.rationale || "—";
+    renderPathPill(data.path || data.status);
+
+    // Place, bars, map
+    renderPlace(data.place);
+    renderBars(data);
+    renderMap(data.mapEmbedUrl);
+
   } catch (e) {
-    const msg = e.name === "AbortError" ? "Timed out" : e.message;
-    setText("competitors", `Request failed: ${msg}`);
+    banner(String(e), true);
+  } finally {
+    setLoading(false);
   }
 }
 
-/* -------------------------- Wiring --------------------------- */
-$("btnAnalyze")?.addEventListener("click", analyze);
-$("btnCompetitors")?.addEventListener("click", () =>
-  competitors(lastPlaceId, $("tradeSelect").value.trim(), $("area").value.trim())
-);
-$("btnTop")?.addEventListener("click", () =>
-  window.scrollTo({ top: 0, behavior: "smooth" })
-);
+$("btnAnalyze").addEventListener("click", () => runAnalyze());

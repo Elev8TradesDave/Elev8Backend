@@ -6,138 +6,134 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { color-scheme: light dark; }
-    body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; margin: 20px; line-height: 1.45; }
-    .form { max-width: 860px; margin: 0 auto; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; line-height: 1.45; }
+    .form { max-width: 920px; margin: 0 auto; }
     .row { margin: 12px 0; display: grid; gap: 6px; }
-    .controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
     label { font-weight: 600; }
     input, select { padding: 8px 10px; border-radius: 8px; border: 1px solid #d1d5db; min-width: 260px; }
-    button { padding: 10px 14px; border: 0; border-radius: 10px; background: #111827; color: white; cursor: pointer; }
-    .out { max-width: 860px; margin: 18px auto; display: grid; gap: 10px; }
-    .bar { height: 10px; background: #e5e7eb; border-radius: 6px; overflow: hidden; }
-    .fill { height: 100%; width: 0%; background: #10b981; transition: width .4s ease; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 10px; }
-    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 10px 12px; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    iframe { width: 100%; height: 300px; border: 0; border-radius: 12px; }
-    .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; background:#e5e7eb; display:inline-block; }
-    .clar-row { margin-top: 12px; display:none; }
-    .clar-row.show { display:block; }
-    .clar-row button { margin-right: 6px; margin-top: 6px; padding: 6px 10px; font-size: 14px; }
-    .clar-hint { margin-top: 8px; font-style: italic; color: #6b7280; }
+    button { padding: 10px 14px; border: 0; border-radius: 10px; background:#111827; color:white; cursor:pointer; }
+    button[disabled] { opacity: .6; cursor: not-allowed; }
+    .btn-secondary { background: #374151; }
+    .banner { padding: 10px 12px; border-radius: 10px; border: 1px solid #cde3ff; background: #eef6ff; margin: 10px 0; }
+    .error { background: #fff1f2; border-color: #fecdd3; }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; }
+    .card { grid-column: span 12; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; }
+    .cols-6 > .card { grid-column: span 6; }
+    .meter { height: 12px; background: #e5e7eb; border-radius: 10px; overflow: hidden; }
+    .meter > span { display:block; height: 100%; background: #10b981; }
+    .muted { color:#6b7280; font-size: 12px; }
+    iframe { width: 100%; height: 320px; border: 0; border-radius: 12px; }
+    .flex { display:flex; gap:12px; align-items:center; flex-wrap: wrap; }
+    .right { margin-left: auto; }
+    .pill { font-size: 12px; padding: 4px 8px; border-radius: 999px; background: #f3f4f6; }
   </style>
 </head>
 <body>
   <div class="form">
-    <h1>Elev8Trades — Local Visibility Audit</h1>
+    <h1>Local Visibility Audit</h1>
+    <div id="bannerHost"></div>
 
     <div class="row">
       <label for="bName">Business name</label>
-      <input id="bName" placeholder="e.g., All State Home Improvement Inc." />
+      <input id="bName" placeholder="e.g., Allstate Home Improvement Inc" />
+    </div>
+
+    <div class="row">
+      <label for="area">Service area (city/state)</label>
+      <input id="area" placeholder="e.g., New Jersey" />
+    </div>
+
+    <div class="row">
+      <label for="tradeSelect">Trade</label>
+      <select id="tradeSelect">
+        <option value="">Select trade (optional)</option>
+        <option>home improvement</option>
+        <option>electrician</option>
+        <option>plumber</option>
+        <option>roofer</option>
+        <option>masonry</option>
+        <option>landscaper</option>
+        <option>hvac repair</option>
+        <option>hvac install</option>
+      </select>
     </div>
 
     <div class="row">
       <label for="webUrl">Website (optional)</label>
-      <input id="webUrl" placeholder="e.g., www.example.com" />
+      <input id="webUrl" placeholder="e.g., allstatehomeimprovement.com" />
+      <small class="muted">If no GBP is found, we’ll compute a provisional website-only score.</small>
+    </div>
+
+    <!-- Quick name variants -->
+    <div class="row">
+      <label for="altNames">Quick name variants</label>
+      <div class="controls">
+        <select id="altNames"></select>
+        <button id="btnUseAlt" type="button" class="btn-secondary">Use variant</button>
+      </div>
+      <small class="muted">Generates variants like “Allstate / All State / suffixes removed”.</small>
+    </div>
+
+    <!-- Candidate picker -->
+    <div class="row" id="candidateBox" style="display:none;">
+      <label for="candidateSelect">Did you mean…</label>
+      <div class="controls">
+        <select id="candidateSelect"></select>
+        <button id="btnUseCandidate" type="button" class="btn-secondary">Use this</button>
+      </div>
     </div>
 
     <div class="row">
       <div class="controls">
-        <div>
-          <label for="area">City/Area</label><br />
-          <input id="area" placeholder="e.g., Hillside, NJ" />
-        </div>
-        <div>
-          <label for="tradeSelect">Trade</label><br />
-          <select id="tradeSelect">
-            <option value="">Other</option>
-            <option>Roofing</option>
-            <option>Plumbing</option>
-            <option>HVAC (Repair)</option>
-            <option>HVAC (Install)</option>
-            <option>Electrical</option>
-            <option>Landscaping</option>
-            <option>Masonry</option>
-          </select>
-        </div>
-        <div>
-          <label><input type="checkbox" id="fast" /> Fast test mode (skip site fetch)</label>
-        </div>
+        <label class="flex"><input type="checkbox" id="fast" />&nbsp;Fast (skip deep site checks)</label>
+        <label class="flex"><input type="checkbox" id="nocache" />&nbsp;No-cache</label>
+        <span class="right">
+          <button id="btnAnalyze">Analyze</button>
+        </span>
       </div>
     </div>
 
-    <div class="row controls">
-      <button id="btnAnalyze">Analyze</button>
-      <button id="btnCompetitors">Competitors</button>
-      <button id="btnTop">Top</button>
+    <div id="loading" class="banner" style="display:none;">Analyzing…</div>
+
+    <div class="grid cols-6">
+      <div class="card">
+        <div class="flex">
+          <h3 style="margin:0">Result</h3>
+          <span id="pathPill" class="pill right">—</span>
+        </div>
+        <p id="finalScore" style="font-size: 32px; margin: 0;">—</p>
+        <div id="rationale" class="muted">—</div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0">Place</h3>
+        <div id="placeBlock" class="muted">—</div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0">GBP Signals</h3>
+        <div class="row">Rating Quality <div class="meter"><span id="bar-rating" style="width:0%"></span></div></div>
+        <div class="row">Review Volume <div class="meter"><span id="bar-volume" style="width:0%"></span></div></div>
+        <div class="row">Category Match <div class="meter"><span id="bar-category" style="width:0%"></span></div></div>
+        <div class="row">Photos <div class="meter"><span id="bar-photos" style="width:0%"></span></div></div>
+        <div class="row">Hours <div class="meter"><span id="bar-hours" style="width:0%"></span></div></div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0">Website Health</h3>
+        <div class="row">SEO <div class="meter"><span id="bar-seo" style="width:0%"></span></div></div>
+        <div class="row">CTA <div class="meter"><span id="bar-cta" style="width:0%"></span></div></div>
+        <div id="siteNote" class="muted">—</div>
+      </div>
+
+      <div class="card" style="grid-column: span 12;">
+        <h3 style="margin:0">Map Preview</h3>
+        <iframe id="mapFrame" loading="lazy"></iframe>
+      </div>
     </div>
   </div>
 
-  <div class="out">
-    <div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <strong>Overall</strong>
-        <span class="badge mono" id="modeBadge">—</span>
-      </div>
-      <div class="bar"><div class="fill" id="overallBar"></div></div>
-      <div class="mono" id="overallPct">—</div>
-    </div>
-
-    <div class="grid">
-      <div class="card">
-        <strong>SEO</strong>
-        <div class="bar"><div class="fill" id="barSeo"></div></div>
-        <div class="mono" id="valSeo">—</div>
-      </div>
-      <div class="card">
-        <strong>CTA</strong>
-        <div class="bar"><div class="fill" id="barCta"></div></div>
-        <div class="mono" id="valCta">—</div>
-      </div>
-      <div class="card">
-        <strong>GBP (Reviews)</strong>
-        <div class="bar"><div class="fill" id="barGbp"></div></div>
-        <div class="mono" id="valGbp">—</div>
-      </div>
-      <div class="card">
-        <strong>Reviews Dial</strong>
-        <div class="bar"><div class="fill" id="barReviews"></div></div>
-        <div class="mono" id="valReviews">—</div>
-      </div>
-      <div class="card">
-        <strong>Pain Dial</strong>
-        <div class="bar"><div class="fill" id="barPain"></div></div>
-        <div class="mono" id="valPain">—</div>
-      </div>
-    </div>
-
-    <div class="card" id="mapEmbedWrap" style="display:none;">
-      <strong>Map Preview</strong>
-      <iframe id="mapEmbed" loading="lazy"></iframe>
-    </div>
-
-    <div class="card">
-      <strong>Details</strong>
-      <pre class="mono" id="details" style="white-space:pre-wrap;"></pre>
-
-      <!-- CLARIFICATIONS UI -->
-      <div id="clarWrap" class="clar-row">
-        <p id="clarMsg" aria-live="polite" style="margin:8px 0; font-weight:600;"></p>
-        <div id="clarList" style="display:flex; flex-wrap:wrap; gap:6px;"></div>
-        <div class="clar-hint" id="clarHint"></div>
-      </div>
-    </div>
-
-    <div class="card">
-      <strong>Competitors</strong>
-      <pre class="mono" id="competitors" style="white-space:pre-wrap;"></pre>
-    </div>
-  </div>
-
-  <script>
-    // If you host the widget on a different domain, set this before loading widget.js:
-    // window.LVA_API_BASE = "https://elev8backend.onrender.com";
-  </script>
-  <script src="./widget.js"></script>
+  <script src="./widget.js" defer></script>
 </body>
 </html>
