@@ -5,6 +5,7 @@
    - Trade mapping -> businessType (for server-side heuristics)
    - Uses data.detailedScores when present
    - Helpful no-match hint
+   - NEW: placeId URL param support (+ ?auto=1 autorun)
    ============================================================== */
 const $ = id => document.getElementById(id);
 const API = path => (window.LVA_API_BASE || "") + path;
@@ -49,6 +50,28 @@ function deriveBusinessType(trade) {
   if (p.has("url")) $("webUrl").value = normUrlMaybe(p.get("url"));
   // Auto-enable Fast mode if no website
   if (!$("webUrl").value.trim()) $("fast").checked = true;
+})();
+
+/* --- Prefill placeId & optional autorun from URL (NEW) -------- */
+(function prefillPlaceId() {
+  const p = new URLSearchParams(location.search);
+  const pid = p.get("placeId");
+  const auto = p.get("auto");
+  if (pid) {
+    // If name/area already typed/prefilled, show them in Details; else still fine.
+    const name = $("bName")?.value.trim();
+    const area = $("area")?.value.trim();
+    // Run immediately if auto=1, otherwise just set lastPlaceId and wait for user click.
+    if (auto) {
+      analyzeWithPlaceId(pid, name || "Selected business", area || "");
+      // brief lock to avoid double-submit if they also click
+      disableButtons(true);
+      setTimeout(() => disableButtons(false), 1200);
+    } else {
+      // Prime lastPlaceId so a normal Analyze will use it even without name
+      window.lastPlaceId = pid;
+    }
+  }
 })();
 
 /* ------------------- Clarification UI (Flexible) --------------- */
