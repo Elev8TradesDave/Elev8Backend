@@ -34,7 +34,17 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ""; // optional
 app.set("trust proxy", 1);
 app.use(express.json({ limit: "1mb" }));
 app.use(compression());
-app.use(morgan("tiny"));
+
+// Silence Render/browser health checks in logs:
+app.use(
+  morgan("tiny", {
+    skip: (req) =>
+      req.url === "/api/health" ||
+      req.method === "HEAD" ||
+      req.url === "/favicon.ico",
+  })
+);
+
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -43,7 +53,16 @@ app.use(
         "default-src": ["'self'"],
         "script-src": ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
         "style-src": ["'self'", "'unsafe-inline'"],
-        "img-src": ["'self'", "data:", "https:", "http:", "https://maps.gstatic.com", "https://maps.googleapis.com"],
+        "img-src": [
+          "'self'",
+          "data:",
+          "https:",
+          "http:",
+          "https://maps.gstatic.com",
+          "https://maps.googleapis.com",
+          "https://lh3.googleusercontent.com", // photos
+          "https://lh5.googleusercontent.com"
+        ],
         "frame-src": ["'self'", "https://www.google.com"],
         "connect-src": ["'self'"],
       },
@@ -51,6 +70,7 @@ app.use(
     crossOriginEmbedderPolicy: false,
   })
 );
+
 app.use(
   cors({
     origin: (origin, cb) => {
@@ -63,6 +83,7 @@ app.use(
     },
   })
 );
+
 app.use(
   rateLimit({
     windowMs: 60 * 1000,
@@ -74,6 +95,14 @@ app.use(
 
 // Serve widget (static) from repo root so /widget.html works
 app.use(express.static(path.join(__dirname, "..")));
+
+// Also serve widget on root:
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "..", "widget.html"));
+});
+
+// Quiet favicon route to stop 404s and log noise
+app.get("/favicon.ico", (req, res) => res.status(204).end());
 
 // ---------- Tiny in-memory cache (5 min default) ----------
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -150,7 +179,6 @@ const fetchHtml = async (url, timeoutMs = 6000) => {
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), timeoutMs);
 
-    // Node 18+ has global fetch; keep a tiny poly just in case
     const doFetch =
       typeof fetch === "function"
         ? fetch.bind(global)
