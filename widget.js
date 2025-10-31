@@ -1,11 +1,10 @@
 /* ==============================================================
-   widget.js – FINAL POLISHED VERSION
-   - Clarification flex renderer
-   - Trade → businessType (case-insensitive)
-   - URL prefill from QR/query params
-   - Auto-fast mode when no website
-   - Full helper fallbacks
-   - Accessible clarifications
+   widget.js – FINAL POLISHED (r3)
+   - Clarification array/object support
+   - Competitors via backend Maps API
+   - Trade → businessType mapping
+   - Prefer detailedScores; graceful fallbacks
+   - Stronger hint when no candidates returned
    ============================================================== */
 const $ = id => document.getElementById(id);
 const API = path => (window.LVA_API_BASE || "") + path;
@@ -26,15 +25,9 @@ function setText(id, text) {
 async function fetchWithTimeout(resource, options = {}, timeoutMs = 15000) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
   try {
-    const response = await fetch(resource, {
-      ...options,
-      signal: controller.signal
-    });
+    const response = await fetch(resource, { ...options, signal: controller.signal });
     return response;
-  } catch (error) {
-    throw error;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -48,8 +41,8 @@ function normUrlMaybe(u) {
 
 function deriveBusinessType(trade) {
   const t = (trade || "").toLowerCase().trim();
-  const specialty = ["roofing", "plumbing", "electrical", "hvac"];
-  return specialty.includes(t) ? "specialty" : "maintenance";
+  const specialty = ["roofing", "plumbing", "electrical", "hvac", "hvac (repair)", "hvac (install)", "masonry"];
+  return specialty.some(k => t.includes(k.replace(/\s*\(.*?\)\s*/g, ""))) ? "specialty" : "maintenance";
 }
 
 /* ------------------- Prefill from URL (QR, ads) ---------------- */
@@ -59,8 +52,7 @@ function deriveBusinessType(trade) {
   if (p.has("area")) $("area").value = p.get("area");
   if (p.has("name")) $("bName").value = p.get("name");
   if (p.has("url")) $("webUrl").value = normUrlMaybe(p.get("url"));
-  // Auto-enable Fast mode if no website
-  if (!$("webUrl").value.trim()) $("fast").checked = true;
+  if (!$("webUrl").value.trim()) $("fast").checked = true; // Auto-fast if no site
 })();
 
 /* ------------------- Clarification UI (Flexible) --------------- */
@@ -73,33 +65,33 @@ function clearClarifications() {
   if (list) list.innerHTML = "";
 }
 
-function renderClarificationsFlex(clar) {
+function renderClarificationsFlex(clarInput) {
   const wrap = $("clarWrap");
   const msgEl = $("clarMsg");
   const list = $("clarList");
   clearClarifications();
 
-  // Normalize input
-  const clarArr = Array.isArray(clar) ? clar : [clar || {}];
+  // Accept object or array; flatten to {message[], candidates[]}
+  const clarArr = Array.isArray(clarInput) ? clarInput : [clarInput || {}];
   const messages = [];
   let candidates = [];
 
-  clarArr.forEach(item => {
+  for (const item of clarArr) {
     if (item?.message) messages.push(item.message);
-    if (Array.isArray(item?.candidates)) {
-      candidates = candidates.concat(item.candidates);
-    }
-  });
+    if (Array.isArray(item?.candidates)) candidates = candidates.concat(item.candidates);
+  }
 
-  // Show message
+  // Message
   if (msgEl) {
-    const msg = messages.length ? messages.join(" ") : "Multiple matches found. Please select one.";
+    const msg = messages.length
+      ? messages.join(" ")
+      : (candidates.length ? "Multiple matches found. Please select one." : "No exact matches.");
     msgEl.textContent = msg;
     msgEl.setAttribute("aria-live", "polite");
   }
 
-  // Render up to 8 candidates
-  candidates.slice(0, 8).forEach(c => {
+  // Candidates (max 8)
+  (candidates || []).slice(0, 8).forEach(c => {
     const btn = document.createElement("button");
     btn.className = "clar-btn";
     btn.textContent = `${c.name || "Unnamed"} — ${c.formatted_address || "No address"}`;
@@ -108,11 +100,12 @@ function renderClarificationsFlex(clar) {
     list?.appendChild(btn);
   });
 
-  // No matches hint
-  if (candidates.length === 0) {
+  // Stronger hint when empty
+  if (!candidates || candidates.length === 0) {
     const hint = document.createElement("div");
     hint.className = "clar-hint";
-    hint.textContent = "No exact matches. Try adding city/state, shortening the name, or using the website URL.";
+    hint.textContent =
+      "No exact matches. Try adding a city/state, shortening the name, pasting the website URL, or trying a broader search (e.g., just the brand + state).";
     list?.appendChild(hint);
   }
 
@@ -160,32 +153,27 @@ async function analyze() {
       body: JSON.stringify(body),
     }, 15000);
 
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`HTTP ${res.status}: ${err}`);
-    }
-
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const data = await res.json();
 
     if (!data.success) {
       setText("details", `Error: ${data.error || "Unknown error"}`);
-      disableButtons(false);
       return;
     }
 
     if (data.clarifications) {
       renderClarificationsFlex(data.clarifications);
-      disableButtons(false);
       return;
     }
 
     renderScoring(data);
     lastPlaceId = data.placeId || null;
+
+    // Real competitor search via backend (Maps TextSearch/Details)
     await competitors(lastPlaceId, body.tradeSelect, body.serviceArea);
 
   } catch (e) {
-    const msg = e.name === "AbortError" ? "Request timed out." : e.message;
-    setText("details", `Request failed: ${msg}`);
+    setText("details", `Request failed: ${e.name === "AbortError" ? "Request timed out." : e.message}`);
   } finally {
     disableButtons(false);
   }
@@ -204,7 +192,6 @@ async function analyzeWithPlaceId(placeId, name, address) {
     placeId,
     businessType: deriveBusinessType($("tradeSelect").value.trim()),
   };
-
   if (body.websiteUrl) body.websiteUrl = normUrlMaybe(body.websiteUrl);
 
   setText("details", "Analyzing selected place…");
@@ -218,11 +205,7 @@ async function analyzeWithPlaceId(placeId, name, address) {
       body: JSON.stringify(body),
     }, 15000);
 
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`HTTP ${res.status}: ${err}`);
-    }
-
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const data = await res.json();
 
     if (!data.success) {
@@ -235,8 +218,7 @@ async function analyzeWithPlaceId(placeId, name, address) {
     await competitors(lastPlaceId, $("tradeSelect").value.trim(), $("area").value.trim());
 
   } catch (e) {
-    const msg = e.name === "AbortError" ? "Request timed out." : e.message;
-    setText("details", `Request failed: ${msg}`);
+    setText("details", `Request failed: ${e.name === "AbortError" ? "Request timed out." : e.message}`);
   } finally {
     disableButtons(false);
   }
@@ -244,24 +226,26 @@ async function analyzeWithPlaceId(placeId, name, address) {
 
 /* ----------------------- Render Scoring ----------------------- */
 function renderScoring(data) {
+  // Prefer detailedScores if present
+  const ds = data.detailedScores || {};
+  const seoVal = (ds["On-Page SEO"] ?? data.seo ?? 0);
+  const ctaVal = (ds["Call-to-Action Strength"] ?? data.cta ?? 0);
+  const gbpVal = (ds["Overall Rating"] ?? data.gbp ?? 0);
+  const reviewsDial = (ds["Review Volume"] ?? data?.dials?.reviews ?? null);
+  const painDial = (ds["Pain Point Resonance"] ?? data?.dials?.pain ?? null);
+
   setBar("overallBar", data.finalScore || 0);
   setText("overallPct", (data.finalScore ?? "—") + " / 100");
   setText("modeBadge", data.mode || "—");
 
-  const ds = data.detailedScores || {};
-  setBar("barSeo", ds["On-Page SEO"] ?? data.seo ?? 0);
-  setText("valSeo", ds["On-Page SEO"] ?? data.seo ?? "—");
-  setBar("barCta", ds["Call-to-Action Strength"] ?? data.cta ?? 0);
-  setText("valCta", ds["Call-to-Action Strength"] ?? data.cta ?? "—");
-  setBar("barGbp", ds["Overall Rating"] ?? data.gbp ?? 0);
-  setText("valGbp", ds["Overall Rating"] ?? data.gbp ?? "—");
+  setBar("barSeo", seoVal);  setText("valSeo", seoVal ?? "—");
+  setBar("barCta", ctaVal);  setText("valCta", ctaVal ?? "—");
+  setBar("barGbp", gbpVal);  setText("valGbp", gbpVal ?? "—");
 
-  const reviews = ds["Review Volume"] ?? data?.dials?.reviews ?? null;
-  const pain = ds["Pain Point Resonance"] ?? data?.dials?.pain ?? null;
-  setBar("barReviews", reviews || 0);
-  setText("valReviews", reviews ?? "—");
-  setBar("barPain", pain || 0);
-  setText("valPain", pain ?? "—");
+  setBar("barReviews", reviewsDial || 0);
+  setText("valReviews", reviewsDial ?? "—");
+  setBar("barPain", painDial || 0);
+  setText("valPain", painDial ?? "—");
 
   if (data.mapEmbedUrl) {
     $("mapEmbed").src = data.mapEmbedUrl;
@@ -298,11 +282,7 @@ async function competitors(placeId, trade, area) {
       body: JSON.stringify({ placeId, trade, area }),
     }, 15000);
 
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`HTTP ${res.status}: ${err}`);
-    }
-
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
     const data = await res.json();
 
     if (!data.success) {
@@ -319,8 +299,7 @@ async function competitors(placeId, trade, area) {
     setText("competitors", JSON.stringify(out, null, 2));
 
   } catch (e) {
-    const msg = e.name === "AbortError" ? "Timed out" : e.message;
-    setText("competitors", `Request failed: ${msg}`);
+    setText("competitors", `Request failed: ${e.name === "AbortError" ? "Timed out" : e.message}`);
   }
 }
 
