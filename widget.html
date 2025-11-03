@@ -27,6 +27,25 @@
     .flex { display:flex; gap:12px; align-items:center; flex-wrap: wrap; }
     .right { margin-left: auto; }
     .pill { font-size: 12px; padding: 4px 8px; border-radius: 999px; background: #f3f4f6; }
+
+    /* Modal */
+    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items: center; justify-content: center; z-index: 50; }
+    .modal { background: white; color: #111827; max-width: 880px; max-height: 85vh; width: calc(100% - 40px); border-radius: 14px; overflow: hidden; display:flex; flex-direction: column; }
+    .modal header { padding: 14px 16px; border-bottom: 1px solid #e5e7eb; display:flex; align-items:center; gap:10px; }
+    .modal header h3 { margin: 0; font-size: 18px; }
+    .modal .content { padding: 16px; overflow: auto; }
+    .modal footer { padding: 12px 16px; border-top: 1px solid #e5e7eb; text-align: right; }
+    .close-x { background: transparent; color: #111827; border: 1px solid #e5e7eb; }
+    @media (prefers-color-scheme: dark) {
+      .modal { background: #0b0f14; color: #e5e7eb; }
+      .modal header, .modal footer { border-color: #1f2937; }
+      .close-x { color: #e5e7eb; border-color: #334155; }
+    }
+    .playbook h2 { margin: 16px 0 6px; }
+    .playbook h3 { margin: 16px 0 6px; }
+    .playbook ul { margin: 6px 0 12px 20px; }
+    .playbook li { margin: 4px 0; }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; background:#f3f4f6; border-radius:6px; padding:2px 6px; }
   </style>
 </head>
 <body>
@@ -90,6 +109,7 @@
         <label class="flex"><input type="checkbox" id="nocache" />&nbsp;No-cache</label>
         <span class="right">
           <button id="btnAnalyze">Analyze</button>
+          <button id="btnPlaybook" type="button" class="btn-secondary">Grow this trade</button>
         </span>
       </div>
     </div>
@@ -131,6 +151,115 @@
         <h3 style="margin:0">Map Preview</h3>
         <iframe id="mapFrame" loading="lazy"></iframe>
       </div>
+    </div>
+  </div>
+
+  <!-- Playbook Modal (baked-in content) -->
+  <div id="playbookBackdrop" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="pb-title">
+    <div class="modal">
+      <header>
+        <h3 id="pb-title">GBP Siding Growth Playbook — 30-Day Sprint</h3>
+        <span class="muted">(for multi-trade contractors)</span>
+        <button class="close-x right" type="button" id="pb-close-1">Close</button>
+      </header>
+      <div class="content playbook">
+        <p><strong>Goal:</strong> Shift topical relevance and conversions toward <em>Siding</em> in 30 days—without creating a duplicate GBP.</p>
+        <h2>Executive Summary</h2>
+        <ul>
+          <li>Keep <strong>one</strong> GBP. Drive “siding” clarity using <strong>categories, services, products, photos, posts, reviews, Q&amp;A</strong>, and <strong>website alignment</strong>.</li>
+          <li>Temporarily set <strong>Primary Category = Siding contractor</strong> and deep-link GBP to your <span class="kbd">/siding</span> page for 60–90 days.</li>
+          <li>Measure with <strong>UTM tags</strong>, GBP Insights, and lead source notes.</li>
+        </ul>
+
+        <h2>1) Categories (highest leverage)</h2>
+        <ul>
+          <li><strong>Primary:</strong> <em>Siding contractor</em> (flip during siding push; you can switch back seasonally).</li>
+          <li><strong>Secondary:</strong> keep <em>Roofing contractor</em>, add <em>General contractor</em> (and legit subs like <em>Window installation service</em> if applicable).</li>
+          <li>Mirror competitors’ categories when legitimate.</li>
+        </ul>
+
+        <h2>2) Services (structured &amp; keyword-aligned)</h2>
+        <ul>
+          <li>Vinyl siding installation / replacement</li>
+          <li>Fiber-cement siding (James Hardie)</li>
+          <li>Siding repair (storm, hail, single-elevation)</li>
+          <li>Soffit &amp; fascia / aluminum wrap</li>
+          <li>Cedar shake siding</li>
+          <li>Insulated siding; house wrap &amp; flashing</li>
+        </ul>
+
+        <h2>3) Products (visual tiles that convert)</h2>
+        <ul>
+          <li><em>Full Siding Replacement — Free Estimate</em></li>
+          <li><em>James Hardie ColorPlus® Install</em></li>
+          <li><em>Vinyl Siding + Soffit Package</em></li>
+        </ul>
+
+        <h2>4) Links (point GBP at siding)</h2>
+        <ul>
+          <li><strong>Website link →</strong> <span class="kbd">/siding</span> (not homepage).</li>
+          <li><strong>Appointment link →</strong> short “Siding Estimate” form.</li>
+          <li>Use UTM: <span class="kbd">?utm_source=gbp&amp;utm_medium=organic&amp;utm_campaign=siding</span></li>
+        </ul>
+
+        <h2>5) Photos &amp; Video (fresh, labeled)</h2>
+        <ul>
+          <li>Upload 3–5 <strong>siding</strong> photos <strong>weekly</strong> (before/after; trim/soffit close-ups).</li>
+          <li>Captions like “Vinyl siding replacement — Paramus NJ”.</li>
+          <li>Add a 20–45s vertical <strong>site walk-through</strong> video.</li>
+        </ul>
+
+        <h2>6) Posts (weekly)</h2>
+        <p>Example: <em>“Hardie Spring Special — Free Color Consult”</em> → link to <span class="kbd">/siding</span>. Use a photo, one benefit bullet, and a simple CTA.</p>
+
+        <h2>7) Reviews that mention “siding”</h2>
+        <p>After each siding job, prompt: <em>“What work did we do?”</em> Reply once using the word <strong>siding</strong> naturally.</p>
+
+        <h2>8) Q&amp;A (seed genuine questions)</h2>
+        <ul>
+          <li>“Do you install James Hardie fiber-cement siding?”</li>
+          <li>“Can you match existing vinyl?”</li>
+          <li>“How long does full siding replacement take?”</li>
+        </ul>
+
+        <h2>9) Service Area &amp; Citations</h2>
+        <ul>
+          <li>Keep service areas realistic.</li>
+          <li>Update major directories so descriptions mention <strong>siding</strong> alongside <strong>roofing</strong>. Keep NAP consistent.</li>
+        </ul>
+
+        <h2>10) Website Alignment</h2>
+        <ul>
+          <li>Strong <span class="kbd">/siding</span> page: real project photos, towns, brand badges, FAQs, testimonials, short estimate form.</li>
+          <li>Internal links from homepage and roofing pages → <span class="kbd">/siding</span> using natural anchors.</li>
+          <li>Add `LocalBusiness` schema and include “siding” in `serviceType`.</li>
+        </ul>
+
+        <h2>30-Day Execution Plan</h2>
+        <ul>
+          <li><strong>Week 1:</strong> Flip primary → <em>Siding contractor</em>; update categories/services/products; set links to <span class="kbd">/siding</span>; 2 posts; 8–10 photos; add 3 Q&amp;As.</li>
+          <li><strong>Week 2:</strong> 1 short siding video; 1 post; request 3 siding-specific reviews.</li>
+          <li><strong>Week 3:</strong> Add 6–8 photos; expand <span class="kbd">/siding</span> FAQs; add town list; internal links.</li>
+          <li><strong>Week 4:</strong> 1 post; reply to reviews with “siding” once; evaluate Insights and adjust.</li>
+        </ul>
+
+        <h2>Measurement</h2>
+        <ul>
+          <li>GBP Insights: growth in <em>siding</em> queries; Actions (Calls, Website visits).</li>
+          <li>Analytics: UTM sessions and form fills on <span class="kbd">/siding</span>.</li>
+          <li>CRM: tag leads “Siding” to quantify result.</li>
+        </ul>
+
+        <h2>Risks &amp; Mitigations</h2>
+        <ul>
+          <li><strong>Roofing lead dip while Primary = Siding.</strong> Mitigate with LSAs/Search ads for roofing; switch back after the sprint.</li>
+          <li><strong>Thin siding page.</strong> Add gallery, FAQs, brands, and neighborhoods quickly.</li>
+          <li><strong>Few siding reviews.</strong> Proactively request; capture specifics in the ask.</li>
+        </ul>
+      </div>
+      <footer>
+        <button class="close-x" type="button" id="pb-close-2">Close</button>
+      </footer>
     </div>
   </div>
 

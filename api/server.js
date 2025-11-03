@@ -1,4 +1,4 @@
-/**
+/** 
  * Elev8Trades Backend — Local Visibility Audit (SAB-friendly, Render-ready)
  * File: api/server.js
  *
@@ -584,7 +584,7 @@ app.post("/api/analyze", async (req, res) => {
         params: {
           key: GOOGLE_MAPS_API_KEY_SERVER,
           place_id: placeId,
-          fields: [
+        fields: [
             "place_id","name","formatted_address","website","rating","user_ratings_total",
             "photos","formatted_phone_number","opening_hours","url","types","editorial_summary",
             "opening_hours.open_now"

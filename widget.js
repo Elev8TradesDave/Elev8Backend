@@ -17,6 +17,17 @@ function setLoading(on) {
   $("btnAnalyze").disabled = on;
 }
 
+// ---------- Playbook Modal ----------
+function openPlaybook() { $("playbookBackdrop").style.display = "flex"; }
+function closePlaybook() { $("playbookBackdrop").style.display = "none"; }
+
+$("btnPlaybook").addEventListener("click", openPlaybook);
+$("pb-close-1").addEventListener("click", closePlaybook);
+$("pb-close-2").addEventListener("click", closePlaybook);
+$("playbookBackdrop").addEventListener("click", (e) => {
+  if (e.target.id === "playbookBackdrop") closePlaybook();
+});
+
 // ---------- Name variants (SAB) ----------
 function generateNameVariants(name) {
   const n = (name || "").trim();
@@ -148,7 +159,7 @@ async function runAnalyze(overrides = {}) {
       return;
     }
 
-    // Candidate suggestions
+    // Candidate suggestions (from debug.ambiguous for now)
     showCandidates(data?.debug?.ambiguous);
 
     // Banners by status
