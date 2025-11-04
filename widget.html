@@ -7,262 +7,144 @@
   <style>
     :root { color-scheme: light dark; }
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; line-height: 1.45; }
-    .form { max-width: 920px; margin: 0 auto; }
-    .row { margin: 12px 0; display: grid; gap: 6px; }
-    .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    label { font-weight: 600; }
-    input, select { padding: 8px 10px; border-radius: 8px; border: 1px solid #d1d5db; min-width: 260px; }
+    .form { max-width: 960px; margin: 0 auto; }
+    .row { margin: 12px 0; display: grid; gap: 8px; }
+    .controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    input, select { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line,#ccc); min-width: 220px; }
     button { padding: 10px 14px; border: 0; border-radius: 10px; background:#111827; color:white; cursor:pointer; }
-    button[disabled] { opacity: .6; cursor: not-allowed; }
-    .btn-secondary { background: #374151; }
-    .banner { padding: 10px 12px; border-radius: 10px; border: 1px solid #cde3ff; background: #eef6ff; margin: 10px 0; }
-    .error { background: #fff1f2; border-color: #fecdd3; }
-    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; }
-    .card { grid-column: span 12; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; }
-    .cols-6 > .card { grid-column: span 6; }
-    .meter { height: 12px; background: #e5e7eb; border-radius: 10px; overflow: hidden; }
-    .meter > span { display:block; height: 100%; background: #10b981; }
-    .muted { color:#6b7280; font-size: 12px; }
-    iframe { width: 100%; height: 320px; border: 0; border-radius: 12px; }
-    .flex { display:flex; gap:12px; align-items:center; flex-wrap: wrap; }
-    .right { margin-left: auto; }
-    .pill { font-size: 12px; padding: 4px 8px; border-radius: 999px; background: #f3f4f6; }
-
-    /* Modal */
-    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5); display:none; align-items: center; justify-content: center; z-index: 50; }
-    .modal { background: white; color: #111827; max-width: 880px; max-height: 85vh; width: calc(100% - 40px); border-radius: 14px; overflow: hidden; display:flex; flex-direction: column; }
-    .modal header { padding: 14px 16px; border-bottom: 1px solid #e5e7eb; display:flex; align-items:center; gap:10px; }
-    .modal header h3 { margin: 0; font-size: 18px; }
-    .modal .content { padding: 16px; overflow: auto; }
-    .modal footer { padding: 12px 16px; border-top: 1px solid #e5e7eb; text-align: right; }
-    .close-x { background: transparent; color: #111827; border: 1px solid #e5e7eb; }
-    @media (prefers-color-scheme: dark) {
-      .modal { background: #0b0f14; color: #e5e7eb; }
-      .modal header, .modal footer { border-color: #1f2937; }
-      .close-x { color: #e5e7eb; border-color: #334155; }
-    }
-    .playbook h2 { margin: 16px 0 6px; }
-    .playbook h3 { margin: 16px 0 6px; }
-    .playbook ul { margin: 6px 0 12px 20px; }
-    .playbook li { margin: 4px 0; }
-    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; background:#f3f4f6; border-radius:6px; padding:2px 6px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px; margin: 14px 0; }
+    .small { font-size: 12px; opacity: .8; }
+    .banner { padding: 10px 12px; border-radius: 10px; background:#ecfeff; color:#0e7490; margin: 10px 0; }
+    .banner.error { background:#fee2e2; color:#991b1b; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .bar { height: 10px; background:#e5e7eb; border-radius: 10px; overflow: hidden; }
+    .bar > div { height: 100%; background:#31d01b; width: 0%; transition: width .3s ease; }
+    .nowrap { white-space: nowrap; }
+    .mapWrap { height: 280px; border-radius: 10px; overflow: hidden; border: 1px solid #e5e7eb; }
+    iframe { width: 100%; height: 100%; border: 0; }
+    .candidates .candidate { padding: 8px 10px; border:1px solid #e5e7eb; border-radius: 10px; margin: 6px 0; cursor: pointer; }
+    .candidates .candidate:hover { background:rgba(49,208,27,0.08); }
+    .tableWrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid #eee; text-align: left; }
+    th[role="button"] { cursor: pointer; user-select: none; }
+    #loading { display: none; }
+    #mapHint { font-size: 12px; opacity: .75; }
+    #statusPill { display:inline-block; padding: 4px 8px; border-radius: 20px; background:#f3f4f6; }
+    #ceilingLine { display:none; font-size: 12px; opacity: .9; }
+    #playbookBackdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.4); align-items:center; justify-content:center; }
+    #playbookModal { background:#fff; color:#111; padding:16px; border-radius:12px; max-width:720px; width:92%; }
   </style>
 </head>
 <body>
   <div class="form">
-    <h1>Local Visibility Audit</h1>
+    <h1>Elev8Trades — Local Visibility Audit</h1>
+
     <div id="bannerHost"></div>
 
-    <div class="row">
-      <label for="bName">Business name</label>
-      <input id="bName" placeholder="e.g., Allstate Home Improvement Inc" />
-    </div>
-
-    <div class="row">
-      <label for="area">Service area (city/state)</label>
-      <input id="area" placeholder="e.g., New Jersey" />
-    </div>
-
-    <div class="row">
-      <label for="tradeSelect">Trade</label>
-      <select id="tradeSelect">
-        <option value="">Select trade (optional)</option>
-        <option>home improvement</option>
-        <option>electrician</option>
-        <option>plumber</option>
-        <option>roofer</option>
-        <option>masonry</option>
-        <option>landscaper</option>
-        <option>hvac repair</option>
-        <option>hvac install</option>
-      </select>
-    </div>
-
-    <div class="row">
-      <label for="webUrl">Website (optional)</label>
-      <input id="webUrl" placeholder="e.g., allstatehomeimprovement.com" />
-      <small class="muted">If no GBP is found, we’ll compute a provisional website-only score.</small>
-    </div>
-
-    <!-- Quick name variants -->
-    <div class="row">
-      <label for="altNames">Quick name variants</label>
-      <div class="controls">
-        <select id="altNames"></select>
-        <button id="btnUseAlt" type="button" class="btn-secondary">Use variant</button>
+    <div class="card">
+      <div class="row controls">
+        <input id="bName" placeholder="Business name (optional for SITE_ONLY)" aria-label="Business Name" />
+        <input id="webUrl" placeholder="Website URL (www optional)" aria-label="Website URL" />
+        <select id="tradeSelect" aria-label="Trade">
+          <option>— Select —</option>
+          <option value="roofing">Roofing</option>
+          <option value="plumbing">Plumbing</option>
+          <option value="electrical">Electrical</option>
+          <option value="landscaping">Landscaping</option>
+          <option value="hvac">HVAC</option>
+          <option value="masonry">Masonry</option>
+        </select>
+        <input id="area" placeholder="Service area (city, state or county)" aria-label="Service Area" />
       </div>
-      <small class="muted">Generates variants like “Allstate / All State / suffixes removed”.</small>
-    </div>
-
-    <!-- Candidate picker -->
-    <div class="row" id="candidateBox" style="display:none;">
-      <label for="candidateSelect">Did you mean…</label>
-      <div class="controls">
-        <select id="candidateSelect"></select>
-        <button id="btnUseCandidate" type="button" class="btn-secondary">Use this</button>
+      <div class="row controls">
+        <label><input type="checkbox" id="fast" /> Fast (skip deep HTML)</label>
+        <label><input type="checkbox" id="siteOnly" /> Website-only (no GBP)</label>
+        <label><input type="checkbox" id="noCache" /> No-cache</label>
+        <button id="btnAnalyze">Analyze</button>
+        <button id="btnCompetitors">Top Competitors</button>
+        <button id="btnPlaybook" type="button">Playbook</button>
+        <span id="loading" class="small">Loading…</span>
       </div>
     </div>
 
-    <div class="row">
-      <div class="controls">
-        <label class="flex"><input type="checkbox" id="fast" />&nbsp;Fast (skip deep site checks)</label>
-        <label class="flex"><input type="checkbox" id="nocache" />&nbsp;No-cache</label>
-        <span class="right">
-          <button id="btnAnalyze">Analyze</button>
-          <button id="btnPlaybook" type="button" class="btn-secondary">Grow this trade</button>
-        </span>
-      </div>
-    </div>
+    <div class="card">
+      <div class="grid2">
+        <div>
+          <h3>Overall: <span id="finalScore">0</span>/100</h3>
+          <div id="statusPill" class="small">—</div>
+          <p id="rationale" class="small"></p>
+          <p id="ceilingLine" class="small">Ceiling in effect — fix noted gaps to unlock higher scores.</p>
 
-    <div id="loading" class="banner" style="display:none;">Analyzing…</div>
-
-    <div class="grid cols-6">
-      <div class="card">
-        <div class="flex">
-          <h3 style="margin:0">Result</h3>
-          <span id="pathPill" class="pill right">—</span>
+          <h4>GBP Signals</h4>
+          <div class="row">
+            <div>Rating</div><div class="bar"><div id="bar-rating"></div></div>
+            <div>Volume</div><div class="bar"><div id="bar-volume"></div></div>
+            <div>Category Match</div><div class="bar"><div id="bar-category"></div></div>
+            <div>Photos</div><div class="bar"><div id="bar-photos"></div></div>
+            <div>Hours</div><div class="bar"><div id="bar-hours"></div></div>
+          </div>
         </div>
-        <p id="finalScore" style="font-size: 32px; margin: 0;">—</p>
-        <div id="rationale" class="muted">—</div>
+        <div>
+          <h4>Map Preview</h4>
+          <div class="mapWrap">
+            <iframe id="mapFrame" sandbox="allow-scripts allow-same-origin" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+          </div>
+          <div id="mapHint" class="small">Add/select a GBP to preview location here.</div>
+        </div>
       </div>
+    </div>
 
-      <div class="card">
-        <h3 style="margin:0">Place</h3>
-        <div id="placeBlock" class="muted">—</div>
+    <div id="candidatesCard" class="card" style="display:none;">
+      <h3>Select Your Business</h3>
+      <div id="candidates" class="candidates"></div>
+    </div>
+
+    <div id="competitorsCard" class="card" style="display:none;">
+      <h3>Top Competitors</h3>
+      <div class="tableWrap">
+        <table>
+          <thead>
+            <tr>
+              <th data-k="name" role="button" tabindex="0">Name</th>
+              <th data-k="rating" role="button" tabindex="0">Rating</th>
+              <th data-k="reviews" role="button" tabindex="0">Reviews</th>
+              <th data-k="types" role="button" tabindex="0">Primary Category</th>
+              <th data-k="address" role="button" tabindex="0">Address</th>
+              <th data-k="openNow" role="button" tabindex="0">Status</th>
+              <th data-k="photosCount" role="button" tabindex="0">Photos</th>
+              <th>Links</th>
+            </tr>
+          </thead>
+          <tbody id="compTbody"></tbody>
+        </table>
       </div>
+      <div id="compMeta" class="small"></div>
+    </div>
+  </div>
 
-      <div class="card">
-        <h3 style="margin:0">GBP Signals</h3>
-        <div class="row">Rating Quality <div class="meter"><span id="bar-rating" style="width:0%"></span></div></div>
-        <div class="row">Review Volume <div class="meter"><span id="bar-volume" style="width:0%"></span></div></div>
-        <div class="row">Category Match <div class="meter"><span id="bar-category" style="width:0%"></span></div></div>
-        <div class="row">Photos <div class="meter"><span id="bar-photos" style="width:0%"></span></div></div>
-        <div class="row">Hours <div class="meter"><span id="bar-hours" style="width:0%"></span></div></div>
+  <!-- Playbook Modal -->
+  <div id="playbookBackdrop">
+    <div id="playbookModal">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <h3 id="pb-title">Local Services Playbook</h3>
+        <div>
+          <button id="pb-close-1">Close</button>
+        </div>
       </div>
-
-      <div class="card">
-        <h3 style="margin:0">Website Health</h3>
-        <div class="row">SEO <div class="meter"><span id="bar-seo" style="width:0%"></span></div></div>
-        <div class="row">CTA <div class="meter"><span id="bar-cta" style="width:0%"></span></div></div>
-        <div id="siteNote" class="muted">—</div>
-      </div>
-
-      <div class="card" style="grid-column: span 12;">
-        <h3 style="margin:0">Map Preview</h3>
-        <iframe id="mapFrame" loading="lazy"></iframe>
+      <ol class="small">
+        <li>Claim/verify GBP. Add photos (aim for 20+), hours, services, and categories.</li>
+        <li>Earn reviews consistently (target 5–10/mo). Reply to all.</li>
+        <li>Fix NAP citations; ensure site shows phone, address, and service areas.</li>
+        <li>Add location + service pages with unique content and clear CTAs.</li>
+        <li>Track calls and form fills; iterate monthly.</li>
+      </ol>
+      <div style="text-align:right;">
+        <button id="pb-close-2">Done</button>
       </div>
     </div>
   </div>
 
-  <!-- Playbook Modal (baked-in content) -->
-  <div id="playbookBackdrop" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="pb-title">
-    <div class="modal">
-      <header>
-        <h3 id="pb-title">GBP Siding Growth Playbook — 30-Day Sprint</h3>
-        <span class="muted">(for multi-trade contractors)</span>
-        <button class="close-x right" type="button" id="pb-close-1">Close</button>
-      </header>
-      <div class="content playbook">
-        <p><strong>Goal:</strong> Shift topical relevance and conversions toward <em>Siding</em> in 30 days—without creating a duplicate GBP.</p>
-        <h2>Executive Summary</h2>
-        <ul>
-          <li>Keep <strong>one</strong> GBP. Drive “siding” clarity using <strong>categories, services, products, photos, posts, reviews, Q&amp;A</strong>, and <strong>website alignment</strong>.</li>
-          <li>Temporarily set <strong>Primary Category = Siding contractor</strong> and deep-link GBP to your <span class="kbd">/siding</span> page for 60–90 days.</li>
-          <li>Measure with <strong>UTM tags</strong>, GBP Insights, and lead source notes.</li>
-        </ul>
-
-        <h2>1) Categories (highest leverage)</h2>
-        <ul>
-          <li><strong>Primary:</strong> <em>Siding contractor</em> (flip during siding push; you can switch back seasonally).</li>
-          <li><strong>Secondary:</strong> keep <em>Roofing contractor</em>, add <em>General contractor</em> (and legit subs like <em>Window installation service</em> if applicable).</li>
-          <li>Mirror competitors’ categories when legitimate.</li>
-        </ul>
-
-        <h2>2) Services (structured &amp; keyword-aligned)</h2>
-        <ul>
-          <li>Vinyl siding installation / replacement</li>
-          <li>Fiber-cement siding (James Hardie)</li>
-          <li>Siding repair (storm, hail, single-elevation)</li>
-          <li>Soffit &amp; fascia / aluminum wrap</li>
-          <li>Cedar shake siding</li>
-          <li>Insulated siding; house wrap &amp; flashing</li>
-        </ul>
-
-        <h2>3) Products (visual tiles that convert)</h2>
-        <ul>
-          <li><em>Full Siding Replacement — Free Estimate</em></li>
-          <li><em>James Hardie ColorPlus® Install</em></li>
-          <li><em>Vinyl Siding + Soffit Package</em></li>
-        </ul>
-
-        <h2>4) Links (point GBP at siding)</h2>
-        <ul>
-          <li><strong>Website link →</strong> <span class="kbd">/siding</span> (not homepage).</li>
-          <li><strong>Appointment link →</strong> short “Siding Estimate” form.</li>
-          <li>Use UTM: <span class="kbd">?utm_source=gbp&amp;utm_medium=organic&amp;utm_campaign=siding</span></li>
-        </ul>
-
-        <h2>5) Photos &amp; Video (fresh, labeled)</h2>
-        <ul>
-          <li>Upload 3–5 <strong>siding</strong> photos <strong>weekly</strong> (before/after; trim/soffit close-ups).</li>
-          <li>Captions like “Vinyl siding replacement — Paramus NJ”.</li>
-          <li>Add a 20–45s vertical <strong>site walk-through</strong> video.</li>
-        </ul>
-
-        <h2>6) Posts (weekly)</h2>
-        <p>Example: <em>“Hardie Spring Special — Free Color Consult”</em> → link to <span class="kbd">/siding</span>. Use a photo, one benefit bullet, and a simple CTA.</p>
-
-        <h2>7) Reviews that mention “siding”</h2>
-        <p>After each siding job, prompt: <em>“What work did we do?”</em> Reply once using the word <strong>siding</strong> naturally.</p>
-
-        <h2>8) Q&amp;A (seed genuine questions)</h2>
-        <ul>
-          <li>“Do you install James Hardie fiber-cement siding?”</li>
-          <li>“Can you match existing vinyl?”</li>
-          <li>“How long does full siding replacement take?”</li>
-        </ul>
-
-        <h2>9) Service Area &amp; Citations</h2>
-        <ul>
-          <li>Keep service areas realistic.</li>
-          <li>Update major directories so descriptions mention <strong>siding</strong> alongside <strong>roofing</strong>. Keep NAP consistent.</li>
-        </ul>
-
-        <h2>10) Website Alignment</h2>
-        <ul>
-          <li>Strong <span class="kbd">/siding</span> page: real project photos, towns, brand badges, FAQs, testimonials, short estimate form.</li>
-          <li>Internal links from homepage and roofing pages → <span class="kbd">/siding</span> using natural anchors.</li>
-          <li>Add `LocalBusiness` schema and include “siding” in `serviceType`.</li>
-        </ul>
-
-        <h2>30-Day Execution Plan</h2>
-        <ul>
-          <li><strong>Week 1:</strong> Flip primary → <em>Siding contractor</em>; update categories/services/products; set links to <span class="kbd">/siding</span>; 2 posts; 8–10 photos; add 3 Q&amp;As.</li>
-          <li><strong>Week 2:</strong> 1 short siding video; 1 post; request 3 siding-specific reviews.</li>
-          <li><strong>Week 3:</strong> Add 6–8 photos; expand <span class="kbd">/siding</span> FAQs; add town list; internal links.</li>
-          <li><strong>Week 4:</strong> 1 post; reply to reviews with “siding” once; evaluate Insights and adjust.</li>
-        </ul>
-
-        <h2>Measurement</h2>
-        <ul>
-          <li>GBP Insights: growth in <em>siding</em> queries; Actions (Calls, Website visits).</li>
-          <li>Analytics: UTM sessions and form fills on <span class="kbd">/siding</span>.</li>
-          <li>CRM: tag leads “Siding” to quantify result.</li>
-        </ul>
-
-        <h2>Risks &amp; Mitigations</h2>
-        <ul>
-          <li><strong>Roofing lead dip while Primary = Siding.</strong> Mitigate with LSAs/Search ads for roofing; switch back after the sprint.</li>
-          <li><strong>Thin siding page.</strong> Add gallery, FAQs, brands, and neighborhoods quickly.</li>
-          <li><strong>Few siding reviews.</strong> Proactively request; capture specifics in the ask.</li>
-        </ul>
-      </div>
-      <footer>
-        <button class="close-x" type="button" id="pb-close-2">Close</button>
-      </footer>
-    </div>
-  </div>
-
-  <script src="./widget.js" defer></script>
+  <script src="widget.js"></script>
 </body>
 </html>

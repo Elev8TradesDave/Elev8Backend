@@ -1,18 +1,13 @@
-/** 
- * Elev8Trades Backend — Local Visibility Audit (SAB-friendly, Render-ready)
- * File: api/server.js
- *
- * ENV (Render):
- *   NODE_ENV=production
- *   GOOGLE_MAPS_API_KEY_SERVER=...
- *   GOOGLE_MAPS_EMBED_KEY=...
- *   GEMINI_API_KEY=...          (optional, unused in this file)
- *   ENABLE_AD_SCRAPE=false      (ignored here; no scraping)
- *
- * Node 18+ required (global fetch).
+/**
+ * Elev8Trades Backend (Render-friendly)
+ * Paths: SITE_ONLY / SITE_ONLY_FORCED / GBP_ONLY / BLENDED_60_40 / NEEDS_INPUT
+ * SAB-aware place resolution; candidate picker; health route; caching; rate limits; CSP; competitors.
  */
 
 require("dotenv").config();
+
+// Global fetch polyfill for Node 18 on Render
+global.fetch = (...args) => import("node-fetch").then(m => m.default(...args));
 
 const path = require("path");
 const express = require("express");
@@ -20,785 +15,557 @@ const cors = require("cors");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const compression = require("compression");
-const morgan = require("morgan");
 const { Client } = require("@googlemaps/google-maps-services-js");
-const cheerio = require("cheerio");
 
-const app = express();
+// ===== Env / Startup guards =====
 const PORT = process.env.PORT || 10000;
 const NODE_ENV = process.env.NODE_ENV || "development";
-const GOOGLE_MAPS_API_KEY_SERVER = process.env.GOOGLE_MAPS_API_KEY_SERVER || "";
-const GOOGLE_MAPS_EMBED_KEY = process.env.GOOGLE_MAPS_EMBED_KEY || "";
+const IS_PRODUCTION = NODE_ENV === "production";
 
-// ---------- Middleware ----------
-app.set("trust proxy", 1);
+if (!process.env.GOOGLE_MAPS_API_KEY_SERVER) {
+  console.error("FATAL: GOOGLE_MAPS_API_KEY_SERVER secret missing");
+  process.exit(1);
+}
+if (!process.env.GOOGLE_MAPS_EMBED_KEY) {
+  console.warn("WARN: GOOGLE_MAPS_EMBED_KEY missing — map embed previews will be disabled.");
+}
+if (process.env.GEMINI_API_KEY && !IS_PRODUCTION) {
+  console.log("[info] Gemini key detected (not used yet).");
+}
+
+const app = express();
+
+// ===== Security headers (minimal CSP + COEP off to allow Google maps) =====
+app.disable("x-powered-by");
+app.use(helmet({
+  crossOriginEmbedderPolicy: false,
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      "default-src": ["'self'"],
+      "script-src": ["'self'", "'unsafe-inline'"],
+      "style-src": ["'self'", "'unsafe-inline'"],
+      "img-src": ["'self'", "data:", "https:", "https://maps.gstatic.com", "https://maps.googleapis.com"],
+      "frame-src": ["'self'", "https://www.google.com"],
+      "connect-src": ["'self'"]
+    }
+  }
+}));
+
+// ===== JSON / Compression =====
 app.use(express.json({ limit: "1mb" }));
 app.use(compression());
 
-// Silence health checks in logs
-app.use(
-  morgan("tiny", {
-    skip: (req) =>
-      req.url === "/api/health" ||
-      req.method === "HEAD" ||
-      req.url === "/favicon.ico",
-  })
-);
+// ===== CORS (tight whitelist — replace with your real domain[s]) =====
+const ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "https://elev8trades.com",
+  "https://widget.elev8trades.com"
+];
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // server-to-server / curl
+    const ok = ALLOWED_ORIGINS.some(o => origin.startsWith(o));
+    return cb(null, ok);
+  }
+}));
 
-// CSP allowlists for Maps embeds and photo hosts
-app.use(
-  helmet({
-    contentSecurityPolicy: {
-      useDefaults: true,
-      directives: {
-        "default-src": ["'self'"],
-        "script-src": ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
-        "style-src": ["'self'", "'unsafe-inline'"],
-        "img-src": [
-          "'self'",
-          "data:",
-          "https:",
-          "http:",
-          "https://maps.gstatic.com",
-          "https://maps.googleapis.com",
-          "https://lh3.googleusercontent.com",
-          "https://lh5.googleusercontent.com",
-        ],
-        "frame-src": ["'self'", "https://www.google.com"],
-        "connect-src": ["'self'"],
-      },
-    },
-    crossOriginEmbedderPolicy: false,
-  })
-);
+// ===== Rate limiting =====
+app.use(rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false }));
+const analyzeLimiter = rateLimit({ windowMs: 60 * 1000, max: 15, standardHeaders: true, legacyHeaders: false });
+// Competitive endpoint limiter (quota-safe)
+const competitorLimiter = rateLimit({ windowMs: 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false });
 
-// CORS (localhost + any https origin by default; tighten if you want)
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (!origin) return cb(null, true);
-      const ok =
-        origin.startsWith("http://localhost") ||
-        origin.startsWith("http://127.0.0.1") ||
-        origin.startsWith("https://");
-      return ok ? cb(null, true) : cb(null, false);
-    },
-  })
-);
+// ===== Serve widget from root and explicit path (for QR deep-link) =====
+app.get("/", (_req, res) => res.sendFile(path.join(process.cwd(), "widget.html")));
+app.get("/widget.html", (_req, res) => res.sendFile(path.join(process.cwd(), "widget.html")));
 
-// Simple rate limit
-app.use(
-  rateLimit({
-    windowMs: 60 * 1000,
-    max: 60,
-    standardHeaders: true,
-    legacyHeaders: false,
-  })
-);
-
-// Serve widget (repo root)
-app.use(express.static(path.join(__dirname, "..")));
-app.get("/", (req, res) => res.sendFile(path.join(__dirname, "..", "widget.html")));
-app.get("/favicon.ico", (req, res) => res.status(204).end());
-
-// ---------- Cache ----------
-// 6h for place details (reduces quota/latency); 1h for html probes
-const TTL_DETAILS_MS = 6 * 60 * 60 * 1000;
-const TTL_HTML_MS = 60 * 60 * 1000;
-const cache = new Map(); // key -> { data, expires }
+// ===== In-memory TTL cache =====
+const _cache = new Map();
 const now = () => Date.now();
-const cacheGet = (k) => {
-  const hit = cache.get(k);
+function cacheSet(key, val, ttlMs = 6 * 60 * 60 * 1000) { _cache.set(key, { v: val, exp: now() + ttlMs }); }
+function cacheGet(key) {
+  const hit = _cache.get(key);
   if (!hit) return null;
-  if (now() > hit.expires) {
-    cache.delete(k);
-    return null;
-  }
-  return hit.data;
-};
-const cacheSet = (k, data, ttl) => cache.set(k, { data, expires: now() + ttl });
-
-// nocache helper
-const noCache = (req) => String(req.query?.nocache || "").trim() === "1";
-
-// ---------- Google Maps ----------
-const gmaps = new Client();
-async function mapsCall(method, args, timeoutMs = 8000) {
-  try {
-    const res = await method.call(gmaps, { timeout: timeoutMs, ...args });
-    return { ok: true, data: res.data };
-  } catch (err) {
-    const payload = err?.response?.data || err?.message || "Maps error";
-    console.error(JSON.stringify({ at: "maps", error: payload }));
-    return { ok: false, error: payload };
-  }
+  if (hit.exp < now()) { _cache.delete(key); return null; }
+  return hit.v;
 }
+function noCache(req) { return !!req.query?.nocache || !!req.body?.nocache; }
 
-// ---------- Utils ----------
-const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
-const normalizeUrl = (u) => {
-  if (!u) return null;
-  let s = String(u).trim();
+// ===== Google Maps client =====
+const maps = new Client({});
+const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY_SERVER;
+const EMBED_KEY = process.env.GOOGLE_MAPS_EMBED_KEY;
+
+// ===== Helpers =====
+function trimStr(x) { return String(x || "").trim(); }
+function normalizeUrl(u) {
+  if (!u) return "";
+  let s = trimStr(u);
+  if (!s) return "";
   if (!/^https?:\/\//i.test(s)) s = "https://" + s;
+  s = s.replace(/\/+$/, "/");
+  return s;
+}
+
+async function probeSite(url, timeoutMs = 7000) {
   try {
-    const url = new URL(s);
-    url.hash = "";
-    return url.toString();
-  } catch {
-    return null;
-  }
-};
-
-// ---------- SAB Place Resolution ----------
-function expandNameVariants(name = "") {
-  const n = name.trim();
-  const out = new Set([n]);
-  out.add(n.replace(/\binc\.?\b/gi, "").trim());
-  out.add(n.replace(/\bllc\b/gi, "").trim());
-  out.add(n.replace(/\bco\.?\b/gi, "").trim());
-  out.add(n.replace(/\bcorp\.?\b/gi, "").trim());
-  out.add(n.replace(/\ball\s*state\b/gi, "Allstate"));
-  out.add(n.replace(/\ballstate\b/gi, "All State"));
-  return Array.from(out).filter(Boolean);
-}
-
-function expandTradeSynonyms(trade = "") {
-  const t = trade.toLowerCase();
-  const map = {
-    "home improvement": ["general contractor", "remodeling contractor", "home remodeler"],
-    electrician: ["electrical contractor"],
-    plumber: ["plumbing contractor"],
-    roofer: ["roofing contractor"],
-    masonry: ["masonry contractor", "concrete contractor"],
-    landscaper: ["landscaping contractor", "lawn care"],
-  };
-  return map[t] || [];
-}
-
-async function geocodeCenter(area) {
-  if (!area) return null;
-  try {
-    const geo = await mapsCall(gmaps.geocode, {
-      params: { address: area, key: GOOGLE_MAPS_API_KEY_SERVER },
-    });
-    const c = geo.ok && geo.data?.results?.[0]?.geometry?.location;
-    return c ? { lat: c.lat, lng: c.lng } : null;
-  } catch {
-    return null;
-  }
-}
-
-async function resolvePlaceRobust({ businessName, businessType, serviceArea }) {
-  const center = await geocodeCenter(serviceArea);
-  const nameVariants = expandNameVariants(businessName);
-  const tradeVariants = [businessType, ...expandTradeSynonyms(businessType)].filter(Boolean);
-
-  const queries = new Set();
-  for (const n of nameVariants) {
-    queries.add(`${n}, ${serviceArea}`);
-    if (businessType) queries.add(`${n} ${businessType} ${serviceArea}`);
-    for (const tv of tradeVariants) queries.add(`${n} ${tv} ${serviceArea}`);
-  }
-  queries.add(`${businessName} ${serviceArea}`);
-
-  for (const q of Array.from(queries)) {
-    const params = { query: q, key: GOOGLE_MAPS_API_KEY_SERVER, region: "us" };
-    if (center) {
-      params.location = center;
-      params.radius = 80000; // ~80km bias for SABs
-    }
-    const resp = await mapsCall(gmaps.textSearch, { params });
-    const results = resp.ok ? resp.data?.results || [] : [];
-    if (results.length) {
-      return { results, queryTried: q, centerUsed: !!center };
-    }
-  }
-  return { results: [], queryTried: null, centerUsed: !!center };
-}
-
-// ---------- GBP Score (v1 spec) ----------
-function scoreReviewVolume(count) {
-  if (!Number.isFinite(count) || count <= 0) return 0;
-  if (count < 5) return 0.25;
-  if (count < 20) return 0.40;
-  if (count < 50) return 0.60;
-  if (count < 100) return 0.80;
-  if (count < 250) return 0.90;
-  return 1.0;
-}
-function computeGbpScore(details, expectedTradeLabel /* e.g., "electrician" */) {
-  const rating = Number(details?.rating) || 0;
-  const reviews = Number(details?.user_ratings_total) || 0;
-  const hasPhotos = Array.isArray(details?.photos) && details.photos.length > 0;
-  const hasHours = !!details?.opening_hours;
-  const primaryType = Array.isArray(details?.types) ? details.types[0] : "";
-  const categoryText = details?.editorial_summary?.overview || primaryType || "";
-
-  const ratingNorm = clamp(rating / 5, 0, 1);
-  const volNorm = scoreReviewVolume(reviews);
-  const trade = (expectedTradeLabel || "").toLowerCase();
-  const catText = String(categoryText || "").toLowerCase();
-  const categoryNorm = trade ? (catText.includes(trade) ? 1 : 0.6) : 0.8;
-  const photosNorm = hasPhotos ? 1 : 0;
-  const hoursNorm = hasHours ? 1 : 0;
-
-  const W = { ratingQuality: 0.40, reviewVolume: 0.25, categoryMatch: 0.15, photos: 0.10, hours: 0.10 };
-
-  const gbpScore =
-    (ratingNorm * W.ratingQuality +
-      volNorm * W.reviewVolume +
-      categoryNorm * W.categoryMatch +
-      photosNorm * W.photos +
-      hoursNorm * W.hours) * 100;
-
-  return {
-    score: Math.round(gbpScore),
-    subs: {
-      ratingQuality: Math.round(ratingNorm * 100),
-      reviewVolume: Math.round(volNorm * 100),
-      categoryMatch: Math.round(categoryNorm * 100),
-      photos: Math.round(photosNorm * 100),
-      hours: Math.round(hoursNorm * 100),
-      raw: { rating, reviews, primaryType },
-    },
-  };
-}
-
-// ---------- Site Probe (HEAD + quick checks) ----------
-async function probeSite(url, { timeoutMs = 4000 } = {}) {
-  try {
-    if (!url) return { checked: false, reachable: false, https: false, hasContact: false, contentLen: 0 };
-    let u = url.trim();
-    if (!/^https?:\/\//i.test(u)) u = "https://" + u;
-
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    const res = await fetch(u, { method: "HEAD", redirect: "follow", signal: ctrl.signal });
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
+    const res = await fetch(url, { method: "HEAD", redirect: "follow", signal: ctl.signal });
     clearTimeout(t);
-
-    const reachable = res.ok;
-    const https = u.startsWith("https://");
-    const cl = Number(res.headers.get("content-length")) || 0;
-
-    // best-effort /contact HEAD
-    let hasContact = false;
-    try {
-      const cu = new URL(u);
-      cu.pathname = "/contact";
-      const ctrl2 = new AbortController();
-      const t2 = setTimeout(() => ctrl2.abort(), timeoutMs);
-      const cRes = await fetch(cu.toString(), { method: "HEAD", redirect: "follow", signal: ctrl2.signal });
-      clearTimeout(t2);
-      hasContact = cRes.ok;
-    } catch {}
-
-    return { checked: true, reachable, https, hasContact, contentLen: cl, url: u };
+    if (res.ok || (res.status >= 200 && res.status < 400)) return { ok: true, status: res.status };
+    return { ok: false, status: res.status };
   } catch (e) {
-    return { checked: true, reachable: false, https: /^https:\/\//i.test(url || ""), hasContact: false, contentLen: 0, url };
+    return { ok: false, error: String(e) };
   }
 }
 
-// ---------- HTML fetch (GET) for SEO/CTA ----------
-async function fetchHtml(url, timeoutMs = 6000, useCache = true) {
-  const u = normalizeUrl(url);
-  if (!u) return { html: null, contentType: "" };
+async function fetchHtml(url, timeoutMs = 8000) {
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), timeoutMs);
+    const res = await fetch(url, { redirect: "follow", signal: ctl.signal });
+    clearTimeout(t);
+    if (!res.ok) return { ok: false, status: res.status };
+    const text = await res.text();
+    return { ok: true, text };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
 
-  const key = `html:${u}`;
-  if (useCache) {
-    const cached = cacheGet(key);
+function extractSiteSignals(html) {
+  const out = { titleLen: 0, hasMetaDesc: false, telCount: 0, h1Count: 0, ctaBonus: 0 };
+  if (!html) return out;
+  const titleMatch = html.match(/<title[^>]*>([^<]{0,300})<\/title>/i);
+  out.titleLen = titleMatch ? trimStr(titleMatch[1]).length : 0;
+  out.hasMetaDesc = /<meta[^>]+name=["']description["'][^>]*>/i.test(html);
+  const telMatches = html.match(/href\s*=\s*["']\s*tel:/gi);
+  out.telCount = telMatches ? telMatches.length : 0;
+  const h1Matches = html.match(/<h1\b[^>]*>/gi);
+  out.h1Count = h1Matches ? h1Matches.length : 0;
+  const extra = Math.max(0, out.telCount - 1) * 2;
+  out.ctaBonus = Math.min(10, extra);
+  return out;
+}
+
+function scoreWebsite(signals, reachable) {
+  let base = 20;
+  if (signals.titleLen >= 10) base += 10;
+  if (signals.titleLen >= 30) base += 10;
+  if (signals.hasMetaDesc) base += 10;
+  if (signals.h1Count >= 1) base += 10;
+  base += signals.ctaBonus; // up to +10
+  if (!reachable) base -= 30;
+  return Math.max(0, Math.min(100, Math.round(base)));
+}
+
+function volumePctFromReviews(reviews) {
+  if (reviews >= 100) return 100;
+  if (reviews >= 50)  return 85;
+  if (reviews >= 20)  return 70;
+  if (reviews >= 5)   return 50;
+  return 20;
+}
+
+function scoreGBP(details, businessType) {
+  const out = { ratingPct: 0, volumePct: 0, categoryPct: 0, photosPct: 0, hoursPct: 0 };
+  if (!details) return { gbpScore: 0, ...out };
+
+  const rating = details.rating || 0;
+  const reviews = details.user_ratings_total || 0;
+  const cats = (details.types || []).map(t => String(t).toLowerCase());
+  const photos = Array.isArray(details.photos) ? details.photos.length : (details.photos || []).length; // fixed
+  const hasHours = !!(details.opening_hours && typeof details.opening_hours.open_now === "boolean");
+
+  out.ratingPct  = Math.round((rating / 5) * 100);
+  out.volumePct  = volumePctFromReviews(reviews);
+  const bt = String(businessType || "").toLowerCase().trim();
+  out.categoryPct = bt ? (cats.some(c => c.includes(bt)) ? 100 : 50) : 60;
+  out.photosPct  = Math.max(0, Math.min(100, photos * 5));
+  out.hoursPct   = hasHours ? 80 : 40;
+
+  const gbpScore = Math.round(
+    0.35 * out.ratingPct +
+    0.25 * out.volumePct +
+    0.15 * out.categoryPct +
+    0.15 * out.photosPct +
+    0.10 * out.hoursPct
+  );
+
+  return { gbpScore, ...out };
+}
+
+function mapEmbedUrl(placeId) {
+  if (!EMBED_KEY || !placeId) return "";
+  return `https://www.google.com/maps/embed/v1/place?key=${encodeURIComponent(EMBED_KEY)}&q=place_id:${encodeURIComponent(placeId)}`;
+}
+
+function mapsPlaceLink(placeId) {
+  return `https://www.google.com/maps/search/?api=1&query=Google&query_place_id=${encodeURIComponent(placeId)}`;
+}
+
+// Expand name variants: remove suffixes, prefixes, punctuation
+function expandNameVariants(name) {
+  const set = new Set();
+  const cleanTail = (s) => String(s || "")
+    .replace(/[,.\s]+$/g, "")
+    .replace(/^(the|a)\s+/i, "")
+    .replace(/\s*&\s*sons\b/i, "")
+    .trim();
+  const base = cleanTail(name);
+  if (!base) return [];
+  set.add(base);
+  set.add(cleanTail(base.replace(/\b(inc|llc|ltd)\.?$/i, "")));
+  set.add(cleanTail(base.replace(/\b(inc\.?|llc\.?|ltd\.?)\b/gi, "")));
+  set.add(cleanTail(base.replace(/\s+co(mpany)?\.?$/i, "")));
+  return Array.from(set).filter(Boolean);
+}
+
+// crude name similarity (token overlap + length proximity)
+function nameSimilarity(a, b) {
+  const A = String(a || "").toLowerCase();
+  const B = String(b || "").toLowerCase();
+  if (!A || !B) return 0;
+  const at = new Set(A.split(/\s+/).filter(Boolean));
+  const bt = new Set(B.split(/\s+/).filter(Boolean));
+  let overlap = 0;
+  for (const t of at) if (bt.has(t)) overlap++;
+  const lenScore = 1 - Math.min(1, Math.abs(A.length - B.length) / Math.max(A.length, B.length));
+  return overlap * 2 + lenScore; // simple weighted sum
+}
+
+// SAB-aware place resolution (Text Search) — collect from all queries, then pick best
+async function resolvePlace({ businessName, businessType, serviceArea }, { bypassCache }) {
+  const name = trimStr(businessName);
+  const area = trimStr(serviceArea);
+  const bt   = trimStr(businessType);
+  if (!name && !area) return { ok: false, status: "NEEDS_INPUT" };
+
+  const variants = expandNameVariants(name);
+  const queries = (variants.length ? variants : [name || bt]).map(q => [q, bt || "", area || ""].filter(Boolean).join(" "));
+
+  const cacheKey = `place:${queries.join("|")}`;
+  if (!bypassCache) {
+    const cached = cacheGet(cacheKey);
     if (cached) return cached;
   }
 
-  try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    const res = await fetch(u, { signal: ctrl.signal, redirect: "follow" });
-    clearTimeout(t);
+  const candidates = [];
 
-    const ct = res.headers.get("content-type") || "";
-    if (!res.ok || !ct.includes("text/html")) {
-      const out = { html: null, contentType: ct };
-      cacheSet(key, out, TTL_HTML_MS);
-      return out;
-    }
-    const html = await res.text();
-    const out = { html, contentType: ct };
-    cacheSet(key, out, TTL_HTML_MS);
-    return out;
-  } catch {
-    return { html: null, contentType: "" };
-  }
-}
-
-// ---------- CTA scoring ----------
-function scoreCTA({ $, placePhone, placeHours }) {
-  let pts = 0;
-  const breakdown = { directCall: 0, contactPaths: 0, hoursPhone: 0, availability: 0 };
-
-  const telCount = $('a[href^="tel:"]').length;
-  if (telCount >= 1) {
-    pts += 25; breakdown.directCall += 25;
-    if (telCount >= 2) { const add = Math.min(5, (telCount - 1) * 2.5); pts += add; breakdown.directCall += add; }
-  }
-
-  const CTA_WORDS = ["call", "quote", "estimate", "book", "schedule", "contact", "get started", "free estimate"];
-  const ctaNodes = $("a,button").filter((_, el) => CTA_WORDS.some((w) => ($(el).text() || "").toLowerCase().includes(w))).length;
-  if (ctaNodes >= 1) { pts += 15; breakdown.contactPaths += 15; }
-  const extraCta = Math.min(10, Math.max(0, (ctaNodes - 1) * 5));
-  pts += extraCta; breakdown.contactPaths += extraCta;
-
-  const forms = $("form").length;
-  if (forms > 0) { pts += 5; breakdown.contactPaths += 5; }
-
-  if (placePhone) { pts += 10; breakdown.hoursPhone += 10; }
-  if (placeHours) { pts += 5; breakdown.hoursPhone += 5; }
-
-  const bodyText = ($("body").text() || "").toLowerCase();
-  const hasEmergencyWords = /(24\/7|24-7|same day|emergency)/.test(bodyText);
-  if (hasEmergencyWords) { pts += 5; breakdown.availability += 5; }
-
-  if (!placePhone && forms === 0 && ctaNodes === 0) { pts -= 15; breakdown.availability -= 15; }
-
-  return { cta: clamp(pts, 0, 100), ctaBreakdown: breakdown, emergencyHint: hasEmergencyWords };
-}
-
-// ---------- SEO scoring ----------
-function scoreSEO($) {
-  let pts = 0;
-  const breakdown = {
-    indexability: 0, titleMeta: 0, headingsContent: 0, internalLinks: 0, localMarkupNap: 0, uxHygiene: 0,
-  };
-
-  const robots = $('meta[name="robots"]').attr("content")?.toLowerCase() || "";
-  if (robots.includes("noindex")) { pts -= 20; breakdown.indexability -= 20; }
-  if (robots.includes("nofollow")) { pts -= 10; breakdown.indexability -= 10; }
-  if ($('link[rel="canonical"]').attr("href")) { pts += 5; breakdown.indexability += 5; }
-
-  const titleLen = ($("title").first().text() || "").trim().length;
-  if (titleLen >= 20 && titleLen <= 65) { pts += 12; breakdown.titleMeta += 12; }
-  else if ((titleLen >= 1 && titleLen < 20) || (titleLen >= 66 && titleLen <= 80)) { pts += 5; breakdown.titleMeta += 5; }
-  else if (titleLen === 0 || titleLen > 120) { pts -= 10; breakdown.titleMeta -= 10; }
-
-  const md = ($('meta[name="description"]').attr("content") || "").trim().length;
-  if (md >= 120 && md <= 160) { pts += 10; breakdown.titleMeta += 10; }
-  else if ((md >= 60 && md < 120) || (md > 160 && md <= 220)) { pts += 6; breakdown.titleMeta += 6; }
-  else if (md === 0) { pts -= 8; breakdown.titleMeta -= 8; }
-
-  const h1Count = $("h1").length;
-  if (h1Count >= 1) { pts += 8; breakdown.headingsContent += 8; }
-  if (h1Count > 2) { pts -= 6; breakdown.headingsContent -= 6; }
-
-  const text = $("body").text().replace(/\s+/g, " ");
-  const wc = text.split(" ").filter(Boolean).length;
-  if (wc >= 600) { pts += 10; breakdown.headingsContent += 10; }
-  else if (wc >= 300) { pts += 6; breakdown.headingsContent += 6; }
-  else if (wc >= 100) { pts += 3; breakdown.headingsContent += 3; }
-  else { pts -= 4; breakdown.headingsContent -= 4; }
-
-  const internalLinks = $('a[href^="/"], a[href^="./"], a[href^="../"]').length;
-  if (internalLinks >= 40) { pts += 12; breakdown.internalLinks += 12; }
-  else if (internalLinks >= 15) { pts += 8; breakdown.internalLinks += 8; }
-  else if (internalLinks >= 5) { pts += 4; breakdown.internalLinks += 4; }
-  else if (internalLinks >= 1) { pts += 2; breakdown.internalLinks += 2; }
-
-  const navLinks = $("nav a").length;
-  if (navLinks >= 3) { pts += 3; breakdown.internalLinks += 3; }
-
-  let hasLocal = false;
-  $('script[type="application/ld+json"]').each((_, el) => {
+  for (const q of queries) {
     try {
-      const j = JSON.parse($(el).contents().text());
-      const arr = Array.isArray(j) ? j : [j];
-      if (arr.some((x) => /LocalBusiness|Organization/i.test(x["@type"] || ""))) hasLocal = true;
-    } catch {}
-  });
-  if (hasLocal) { pts += 10; breakdown.localMarkupNap += 10; }
-
-  const hasMapIframe = $('iframe[src*="google.com/maps"], iframe[src*="maps.google."]').length > 0;
-  if (hasMapIframe) { pts += 5; breakdown.localMarkupNap += 5; }
-
-  const hasPhoneText = /\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/.test(text);
-  const hasAddressText = /\d{1,5}\s+\w+(\s\w+){0,4}\s+(ave|avenue|st|street|rd|road|blvd|boulevard|dr|drive)/i.test(text);
-  if (hasPhoneText && hasAddressText) { pts += 10; breakdown.localMarkupNap += 10; }
-
-  const htmlStr = $.root().html() || "";
-  const scriptLen = $("script").text().length + $("style").text().length;
-  const ratio = scriptLen / Math.max(1, htmlStr.length);
-  if (ratio > 0.6) { pts -= 6; breakdown.uxHygiene -= 6; }
-
-  const imgs = $("img").slice(0, 20);
-  const withAlt = imgs.filter((_, img) => !!$(img).attr("alt")).length;
-  if (imgs.length >= 5 && withAlt / imgs.length >= 0.6) { pts += 3; breakdown.uxHygiene += 3; }
-  if ($('link[rel="preconnect"], link[rel="preload"]').length > 0) { pts += 3; breakdown.uxHygiene += 3; }
-
-  return { seo: clamp(pts, 0, 100), seoBreakdown: breakdown };
-}
-
-// ---------- Trade-aware Site weights (seo vs cta) ----------
-const SITE_WEIGHTS = {
-  default: { seo: 0.6, cta: 0.4 },
-  roofing: { seo: 0.55, cta: 0.45 },
-  plumbing: { seo: 0.45, cta: 0.55 },
-  hvacRepair: { seo: 0.45, cta: 0.55 },
-  hvacInstall: { seo: 0.65, cta: 0.35 },
-  emergency: { seo: 0.5, cta: 0.5 },
-};
-function pickSiteWeights(trade, emergencyMode) {
-  let key = "default";
-  const t = (trade || "").toLowerCase();
-  if (t.includes("roof")) key = "roofing";
-  else if (t.includes("plumb")) key = "plumbing";
-  else if (t.includes("hvac") || t.includes("air") || t.includes("heat")) {
-    key = t.includes("install") ? "hvacInstall" : "hvacRepair";
+      const resp = await maps.textSearch({
+        params: { key: MAPS_KEY, query: q, region: "us" },
+        timeout: 8000
+      });
+      const results = resp?.data?.results || [];
+      for (const r of results) {
+        candidates.push({
+          placeId: r.place_id,
+          name: r.name,
+          formatted_address: r.formatted_address,
+          rating: r.rating,
+          user_ratings_total: r.user_ratings_total
+        });
+      }
+    } catch { /* continue */ }
   }
-  const base = SITE_WEIGHTS[key] || SITE_WEIGHTS.default;
-  return emergencyMode ? SITE_WEIGHTS.emergency : base;
+
+  if (candidates.length === 0) {
+    const out = { ok: false, status: "AMBIGUOUS", candidates: [] };
+    cacheSet(cacheKey, out, 3 * 60 * 60 * 1000);
+    return out;
+  }
+
+  // Best candidate: similarity -> strength -> reviews (tie-breaker)
+  const scored = candidates.map(c => ({
+    ...c,
+    _sim: nameSimilarity(name, c.name),
+    _strength: (c.rating || 0) * 20 + Math.min(100, (c.user_ratings_total || 0))
+  }));
+  scored.sort((a, b) =>
+    (b._sim - a._sim) ||
+    (b._strength - a._strength) ||
+    ((b.user_ratings_total || 0) - (a.user_ratings_total || 0))
+  );
+  const winner = scored[0];
+
+  const out = { ok: true, placeId: winner.placeId, candidates: scored.map(({ _sim, _strength, ...r }) => r) };
+  cacheSet(cacheKey, out, 3 * 60 * 60 * 1000);
+  return out;
 }
 
-// Embed URL
-const makeMapEmbedUrl = (placeId) => {
-  if (!placeId || !GOOGLE_MAPS_EMBED_KEY) return "";
-  const base = "https://www.google.com/maps/embed/v1/place";
-  const q = new URLSearchParams({ key: GOOGLE_MAPS_EMBED_KEY, q: `place_id:${placeId}` });
-  return `${base}?${q.toString()}`;
-};
+// ===== Small concurrency helper =====
+async function runWithLimit(limit, tasks) {
+  const results = new Array(tasks.length);
+  let i = 0, active = 0;
+  return new Promise((resolve) => {
+    const next = () => {
+      if (i === tasks.length && active === 0) return resolve(results);
+      while (active < limit && i < tasks.length) {
+        const idx = i++;
+        active++;
+        Promise.resolve()
+          .then(tasks[idx])
+          .then((val) => { results[idx] = val; })
+          .catch(() => { results[idx] = null; })
+          .finally(() => { active--; next(); });
+      }
+    };
+    next();
+  });
+}
 
-// ---------- Routes ----------
-app.get("/api/health", (req, res) => {
+// ===== Routes =====
+
+app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     env: NODE_ENV,
-    keysReady: !!(GOOGLE_MAPS_API_KEY_SERVER && GOOGLE_MAPS_EMBED_KEY),
-    hasServerKey: !!GOOGLE_MAPS_API_KEY_SERVER,
-    hasEmbedKey: !!GOOGLE_MAPS_EMBED_KEY,
+    hasServerKey: !!process.env.GOOGLE_MAPS_API_KEY_SERVER,
+    hasEmbedKey: !!process.env.GOOGLE_MAPS_EMBED_KEY
   });
 });
 
-/**
- * Analyze (SAB-aware, adaptive scoring)
- * Request body:
- *  - businessName (string) OR placeId (string)
- *  - serviceArea (string) required unless placeId provided
- *  - websiteUrl (string, optional)
- *  - businessType/tradeSelect (string, optional)
- *  - fast (boolean/number: 1 to skip HTML fetch)
- */
-app.post("/api/analyze", async (req, res) => {
-  const t0 = Date.now();
-  const { businessName, websiteUrl, serviceArea, businessType, tradeSelect, fast, placeId: overridePlaceId } = req.body || {};
-  const log = (o) => console.log(JSON.stringify({ at: "analyze", ...o }));
-
-  if (!overridePlaceId && !businessName) {
-    return res.status(400).json({ success: false, error: "bad_request", message: "businessName or placeId is required" });
-  }
-  if (!overridePlaceId && !serviceArea) {
-    return res.status(400).json({ success: false, error: "bad_request", message: "serviceArea is required when placeId is not provided" });
-  }
-
+app.post("/api/analyze", analyzeLimiter, async (req, res) => {
   try {
-    const bypassCache = noCache(req);
-    let details = null, placeId = null, ambiguous = null, queryTried = null, centerUsed = null;
+    const {
+      businessName, businessType, serviceArea,
+      websiteUrl: rawUrl, placeId: overridePlaceId,
+      fast, siteOnly
+    } = req.body || {};
 
-    // ---- Resolve place ----
-    if (overridePlaceId) {
-      placeId = overridePlaceId;
-    } else {
-      const r = await resolvePlaceRobust({ businessName, businessType: businessType || tradeSelect, serviceArea });
-      const results = r.results || [];
-      queryTried = r.queryTried; centerUsed = r.centerUsed;
+    const bypassCache   = noCache(req);
+    const forceSiteOnly = siteOnly === true || siteOnly === 1;
 
-      if (results.length > 1) {
-        ambiguous = results.slice(0, 3).map(c => ({
-          name: c.name,
-          vicinity: c.vicinity || c.formatted_address,
-          place_id: c.place_id
-        }));
-      }
-      placeId = results[0]?.place_id || null;
-    }
+    // Normalize/probe site
+    const siteUrl   = normalizeUrl(rawUrl);
+    const siteProbe = siteUrl ? await probeSite(siteUrl) : { ok: false };
 
-    // ---- If no GBP but we have a website → SITE_ONLY ----
-    const providedWebsite = normalizeUrl(websiteUrl);
-    if (!placeId && providedWebsite) {
-      const siteProbe = await probeSite(providedWebsite, { timeoutMs: 4000 });
-      const reachable = !!siteProbe.reachable;
-
-      // Optional HTML scoring if not fast and reachable
-      let seo = 0, cta = 0, emergencyWords = false, seoBreakdown = {}, ctaBreakdown = {};
-      if (!fast && reachable) {
-        const { html, contentType } = await fetchHtml(providedWebsite, 6000, !bypassCache);
-        if (html && (contentType || "").includes("text/html")) {
-          const $ = cheerio.load(html);
-          const ctaRes = scoreCTA({ $, placePhone: false, placeHours: false });
-          cta = ctaRes.cta; ctaBreakdown = ctaRes.ctaBreakdown; emergencyWords = ctaRes.emergencyHint;
-          const seoRes = scoreSEO($);
-          seo = seoRes.seo; seoBreakdown = seoRes.seoBreakdown;
-        }
-      }
-
-      const emergencyMode = !!emergencyWords;
-      const w = pickSiteWeights(businessType || tradeSelect, emergencyMode);
-      const siteScore = Math.round(w.seo * seo + w.cta * cta);
-
-      log({ stage: "site_only", reason: "no_gbp_match", siteScore, reachable, queryTried, centerUsed, latencyMs: Date.now() - t0 });
-
-      return res.json({
-        success: true,
-        status: "SITE_ONLY",
-        path: "SITE_ONLY",
-        finalScore: siteScore,
-        placeId: null,
-        place: { name: businessName || null, address: null, website: providedWebsite },
-        signals: {
-          gbp: null,
-          site: { seo, cta, siteWeights: w, reachable, checked: true, ctaBreakdown, seoBreakdown }
-        },
-        rationale: "No Google Business Profile located in the service area. Computed a provisional website-only score.",
-        debug: { queryTried, centerUsed, ambiguous: null }
-      });
-    }
-
-    // ---- If no GBP and no website → friendly guidance (no 4xx) ----
-    if (!placeId && !providedWebsite) {
-      log({ stage: "needs_input", queryTried, centerUsed, latencyMs: Date.now() - t0 });
-      return res.json({
-        success: true,
-        status: "NEEDS_INPUT",
-        path: "NO_GBP_NO_SITE",
-        finalScore: null,
-        signals: { gbp: null, site: null },
-        rationale: "We couldn’t find a Google Business Profile and no website was provided.",
-        actions: [
-          "Provide a website URL (if any) to compute a provisional site-only score.",
-          "Alternatively, claim/create the Google Business Profile and re-run analysis."
-        ],
-        debug: { queryTried, centerUsed, ambiguous: null }
-      });
-    }
-
-    // ---- Place details (cached) ----
-    const detailsKey = `details:${placeId}`;
-    if (!bypassCache) details = cacheGet(detailsKey);
-    if (!details) {
-      const d = await mapsCall(gmaps.placeDetails, {
-        params: {
-          key: GOOGLE_MAPS_API_KEY_SERVER,
-          place_id: placeId,
-        fields: [
-            "place_id","name","formatted_address","website","rating","user_ratings_total",
-            "photos","formatted_phone_number","opening_hours","url","types","editorial_summary",
-            "opening_hours.open_now"
-          ],
-        },
-      });
-      if (!d.ok) {
-        log({ stage: "details_error", placeId, error: d.error });
-        return res.status(502).json({ success: false, error: "place_details_failed", message: String(d.error), placeId });
-      }
-      details = d.data?.result || {};
-      cacheSet(detailsKey, details, TTL_DETAILS_MS);
-    }
-
-    const officialWebsite = normalizeUrl(details.website || websiteUrl);
-    const gbp = computeGbpScore(details, (businessType || tradeSelect || "").toLowerCase());
-    const gbpSignalsPresent =
-      Number(details?.rating) > 0 ||
-      Number(details?.user_ratings_total) > 0 ||
-      (Array.isArray(details?.photos) && details.photos.length > 0) ||
-      !!details?.opening_hours;
-
-    if (!gbpSignalsPresent && !officialWebsite) {
-      log({ stage: "no_signals_gbp", placeId, latencyMs: Date.now() - t0 });
-      return res.json({
-        success: true,
-        status: "NO_SIGNALS",
-        path: "GBP_PRESENT_BUT_EMPTY",
-        finalScore: null,
-        signals: { gbp: gbp.subs, site: null },
-        rationale: "GBP found but with no usable public signals, and no website supplied.",
-        actions: ["Add a website URL or enrich GBP (photos, hours, collect initial reviews), then re-run."]
-      });
-    }
-
-    // ---- Site path: probe + SEO/CTA (optional) ----
-    let siteProbe = null, seo = 0, cta = 0, emergencyWords = false, seoBreakdown = {}, ctaBreakdown = {};
-    if (officialWebsite) {
-      siteProbe = await probeSite(officialWebsite, { timeoutMs: 4000 });
-      const reachable = !!siteProbe.reachable;
-      if (!fast && reachable) {
-        const { html, contentType } = await fetchHtml(officialWebsite, 6000, !bypassCache);
-        if (html && (contentType || "").includes("text/html")) {
-          const $ = cheerio.load(html);
-          const ctaRes = scoreCTA({ $, placePhone: !!details.formatted_phone_number, placeHours: !!details.opening_hours });
-          cta = ctaRes.cta; ctaBreakdown = ctaRes.ctaBreakdown; emergencyWords = ctaRes.emergencyHint;
-          const seoRes = scoreSEO($);
-          seo = seoRes.seo; seoBreakdown = seoRes.seoBreakdown;
+    // Resolve place unless forced site-only
+    let placeId = null;
+    let candidates = [];
+    if (!forceSiteOnly) {
+      if (overridePlaceId) {
+        placeId = trimStr(overridePlaceId) || null;
+      } else {
+        const resolved = await resolvePlace({ businessName, businessType, serviceArea }, { bypassCache });
+        if (resolved.ok) {
+          placeId = resolved.placeId;
+          candidates = resolved.candidates || [];
+        } else if (resolved.candidates?.length) {
+          return res.status(200).json({
+            success: false,
+            status: "NEEDS_INPUT",
+            message: "Pick a candidate or provide a service area.",
+            candidates: resolved.candidates
+          });
         }
       }
     }
 
-    const emergencyMode = !!emergencyWords || !!details?.opening_hours?.open_now;
-    const siteW = pickSiteWeights(businessType || tradeSelect, emergencyMode);
-    const siteScore = Math.round(siteW.seo * seo + siteW.cta * cta);
-
-    // ---- Adaptive final score (v1): GBP 60% / Site 40% if site reachable ----
-    const useBlend = !!(officialWebsite && siteProbe?.checked && siteProbe.reachable);
-    const path = useBlend ? "BLENDED_60_40" : "GBP_ONLY";
-    const finalScore = Math.round(useBlend ? (0.6 * gbp.score + 0.4 * siteScore) : gbp.score);
-
-    const mapEmbedUrl = makeMapEmbedUrl(placeId);
-
-    log({
-      stage: "done",
-      placeId,
-      path,
-      gbpScore: gbp.score,
-      siteScore,
-      finalScore,
-      queryTried, centerUsed,
-      latencyMs: Date.now() - t0
-    });
-
-    return res.json({
-      success: true,
-      status: "OK",
-      placeId,
-      place: {
-        name: details?.name,
-        address: details?.formatted_address,
-        website: officialWebsite || null,
-        rating: details?.rating ?? null,
-        user_ratings_total: details?.user_ratings_total ?? null,
-        open_now: !!details?.opening_hours?.open_now,
-      },
-      path,
-      finalScore,
-      signals: {
-        gbp: gbp.subs,
-        site: {
-          seo, cta, siteWeights: siteW,
-          checked: !!siteProbe,
-          reachable: !!(siteProbe && siteProbe.reachable),
-          ctaBreakdown, seoBreakdown
-        }
-      },
-      rationale: useBlend
-        ? "Blended score: GBP signals + valid website checks."
-        : (officialWebsite ? "Website not reachable within time limit — scored from GBP signals only." : "No website provided — scored from GBP signals only."),
-      mapEmbedUrl,
-      debug: { ambiguous, queryTried, centerUsed }
-    });
-  } catch (err) {
-    const msg = String(err?.response?.data?.error_message || err?.message || err);
-    const code = err?.response?.status || 500;
-    const isQuota = /quota|over|exceeded|429/i.test(msg);
-    const errorCode = isQuota ? "api_quota" : code === 403 ? "forbidden" : "server_error";
-    console.error(JSON.stringify({ at: "analyze", stage: "catch", code, error: msg }));
-    return res.status(isQuota ? 429 : code).json({ success: false, error: errorCode, message: msg });
-  }
-});
-
-// ---------- Competitive Snapshot (no scraping) ----------
-function tradeToQuery(trade) {
-  const t = (trade || "").toLowerCase();
-  if (t.includes("roof")) return "roofing contractor";
-  if (t.includes("plumb")) return "plumber";
-  if (t.includes("hvac") && t.includes("install")) return "hvac installation";
-  if (t.includes("hvac")) return "hvac repair";
-  if (t.includes("electric")) return "electrician";
-  if (t.includes("landscap")) return "landscaping";
-  if (t.includes("mason")) return "masonry contractor";
-  return t || "contractor";
-}
-
-app.post("/api/competitive-snapshot", async (req, res) => {
-  try {
-    const { placeId, trade, area } = req.body || {};
-    const bypassCache = noCache(req);
-
-    // Geometry bias
-    let locationBias = null;
+    // Details (cached)
+    let details = null;
     if (placeId) {
-      const dKey = `geom:${placeId}`;
-      let geom = bypassCache ? null : cacheGet(dKey);
-      if (!geom) {
-        const dRes = await mapsCall(gmaps.placeDetails, {
-          params: { key: GOOGLE_MAPS_API_KEY_SERVER, place_id: placeId, fields: ["geometry", "name"] },
-        });
-        if (dRes.ok) {
-          const g = dRes.data?.result?.geometry?.location;
-          geom = g?.lat && g?.lng ? { lat: g.lat, lng: g.lng } : null;
-          if (geom) cacheSet(dKey, geom, TTL_DETAILS_MS);
-        }
-      }
-      if (geom) locationBias = geom;
-    }
-
-    const base = tradeToQuery(trade);
-    const query = area ? `${base} ${area}` : base;
-
-    const tsKey = `textsearch:${query}:${locationBias ? `${locationBias.lat},${locationBias.lng}` : "x"}`;
-    let basics = bypassCache ? null : cacheGet(tsKey);
-    if (!basics) {
-      const tsRes = await mapsCall(gmaps.textSearch, {
-        params: {
-          key: GOOGLE_MAPS_API_KEY_SERVER,
-          query,
-          type: "establishment",
-          ...(locationBias ? { location: locationBias, radius: 15000 } : {}),
-        },
-      });
-      if (!tsRes.ok) return res.status(502).json({ success: false, error: `textSearch failed: ${tsRes.error}` });
-      basics = (tsRes.data?.results || []).slice(0, 10);
-      cacheSet(tsKey, basics, TTL_DETAILS_MS);
-    }
-
-    const enriched = [];
-    for (const b of basics) {
-      const eKey = `details:${b.place_id}`;
-      let r = bypassCache ? null : cacheGet(eKey);
-      if (!r) {
-        const dRes = await mapsCall(gmaps.placeDetails, {
+      const k = `details:${placeId}`;
+      details = bypassCache ? null : cacheGet(k);
+      if (!details) {
+        const d = await maps.placeDetails({
           params: {
-            key: GOOGLE_MAPS_API_KEY_SERVER,
-            place_id: b.place_id,
-            fields: ["place_id", "name", "formatted_address", "rating", "user_ratings_total", "photos", "website"],
+            key: MAPS_KEY, place_id: placeId,
+            fields: ["place_id","name","rating","user_ratings_total","types","opening_hours","photos","website"]
           },
+          timeout: 8000
         });
-        if (dRes.ok) {
-          r = dRes.data?.result || {};
-          cacheSet(eKey, r, TTL_DETAILS_MS);
-        }
+        details = d?.data?.result || null;
+        if (details) cacheSet(k, details, 12 * 60 * 60 * 1000);
       }
-      if (r) {
-        enriched.push({
-          place_id: r.place_id,
-          name: r.name,
-          address: r.formatted_address,
-          rating: r.rating ?? null,
-          user_ratings_total: r.user_ratings_total ?? null,
-          website: r.website || null,
-          photoCount: (r.photos || []).length,
-        });
-      }
+    }
+
+    // Site score (fetch HTML only if reachable and not fast)
+    let siteScore = 0, siteSignals = null;
+    if (siteUrl && (siteProbe.ok || !fast)) {
+      const htmlRes = (siteProbe.ok && !fast) ? await fetchHtml(siteUrl) : { ok: false };
+      siteSignals = htmlRes.ok ? extractSiteSignals(htmlRes.text) : extractSiteSignals("");
+      siteScore = scoreWebsite(siteSignals, !!siteProbe.ok);
+    }
+
+    // GBP score
+    const { gbpScore, ratingPct, volumePct, categoryPct, photosPct, hoursPct } =
+      scoreGBP(details, businessType);
+
+    // Path / status / final
+    let status = "OK";
+    let path = "BLENDED_60_40";
+    let finalScore = 0;
+    let ceiling = false;
+
+    if (forceSiteOnly) {
+      status = "SITE_ONLY_FORCED"; path = "SITE_ONLY"; finalScore = siteScore; ceiling = true;
+    } else if (!placeId && siteUrl) {
+      status = "SITE_ONLY"; path = "SITE_ONLY"; finalScore = siteScore; ceiling = true;
+    } else if (placeId && (!siteUrl || !siteProbe.ok)) {
+      status = "GBP_ONLY"; path = "GBP_ONLY"; finalScore = gbpScore; ceiling = !siteUrl || !siteProbe.ok;
+    } else if (placeId && siteUrl) {
+      status = "BLENDED_60_40"; path = "BLENDED_60_40"; finalScore = Math.round(0.60 * gbpScore + 0.40 * siteScore);
+      ceiling = gbpScore < 60 || !siteProbe.ok;
+    } else {
+      status = "NEEDS_INPUT"; path = "NEEDS_INPUT"; finalScore = 0;
     }
 
     res.json({
       success: true,
-      queryUsed: query,
-      biasedBy: locationBias,
-      competitors: enriched,
-      adIntel: {
-        googleAdsTransparency: "https://adstransparency.google.com/",
-        metaAdLibrary: "https://www.facebook.com/ads/library/",
-      },
+      status, path, finalScore, ceiling,
+      rationale:
+        status === "SITE_ONLY" || status === "SITE_ONLY_FORCED"
+          ? "Provisional website-only score. Add/claim your Google Business Profile to raise the ceiling."
+          : status === "GBP_ONLY"
+          ? "GBP signals only (website missing or unreachable). Add/repair your website to raise the ceiling."
+          : "Adaptive blend of GBP (60%) and site (40%).",
+      placeId: placeId || null,
+      mapEmbedUrl: placeId ? mapEmbedUrl(placeId) : "",
+      candidates,
+      gbp: { gbpScore, ratingPct, volumePct, categoryPct, photosPct, hoursPct,
+             rating: details?.rating || 0, user_ratings_total: details?.user_ratings_total || 0 },
+      site: { siteUrl, reachable: !!siteProbe.ok, siteScore, signals: siteSignals }
     });
   } catch (err) {
-    console.error(JSON.stringify({ at: "competitive", error: String(err?.message || err) }));
-    res.status(500).json({ success: false, error: "Failed to fetch competitors", details: err?.message || String(err) });
+    if (!IS_PRODUCTION) console.error("Analyze error:", err);
+    res.status(500).json({ success: false, error: "Internal error" });
   }
 });
 
+/**
+ * GET /api/competitive-snapshot
+ * Supports two param styles:
+ *  A) Main-form style:  ?businessName=...&serviceArea=...&businessType=...
+ *  B) Simple style (legacy friendly): ?businessType=...&serviceArea=...   (also accepts trade/area)
+ * Optional: ?nocache=1
+ * Returns: { ok, trade, area, total, cached, items:[{rank,name,rating,reviews,types,address,openNow,website,mapsLink,placeId}] }
+ */
+app.get("/api/competitive-snapshot", competitorLimiter, async (req, res) => {
+  try {
+    const businessName = trimStr(req.query.businessName);
+    const serviceArea  = trimStr(req.query.serviceArea || req.query.area);
+    const businessType = trimStr(req.query.businessType || req.query.trade);
+
+    const trade = businessType;
+    const area  = serviceArea;
+    const bypassCache = !!req.query?.nocache;
+
+    if (!trade || !area) {
+      return res.status(400).json({ ok: false, error: "Missing ?businessType and/or ?serviceArea" });
+    }
+
+    const MAX_COMPETITORS = 6;
+    const COMP_TTL = 60 * 60 * 1000; // 1h
+
+    const cacheKey = `comp:${businessName}:${trade}:${area}`;
+    if (!bypassCache) {
+      const cached = cacheGet(cacheKey);
+      if (cached) return res.json(cached);
+    }
+
+    // 1) Search for competitors
+    const searchQuery = `${trade} in ${area}`;
+    const ts = await maps.textSearch({
+      params: { key: MAPS_KEY, query: searchQuery, region: "us" },
+      timeout: 10000
+    });
+    let results = ts?.data?.results || [];
+
+    // optional self-exclusion (use similarity to catch variants)
+    if (businessName) {
+      results = results.filter(r => nameSimilarity(businessName, r.name || "") < 3);
+    }
+
+    // map skeletons for initial rank sort
+    const ranked = results
+      .map(r => ({
+        place_id: r.place_id,
+        name: r.name,
+        rating: r.rating || 0,
+        user_ratings_total: r.user_ratings_total || 0,
+        formatted_address: r.formatted_address
+      }))
+      .sort((a, b) =>
+        (b.rating - a.rating) ||
+        (b.user_ratings_total - a.user_ratings_total)
+      )
+      .slice(0, MAX_COMPETITORS);
+
+    // 2) Enrich details with concurrency limit
+    const tasks = ranked.map(r => async () => {
+      try {
+        const det = await maps.placeDetails({
+          params: {
+            key: MAPS_KEY,
+            place_id: r.place_id,
+            fields: [
+              "place_id","name","rating","user_ratings_total","formatted_address",
+              "opening_hours","website","types","photos"
+            ]
+          },
+          timeout: 8000
+        });
+        const d = det?.data?.result || {};
+        return {
+          placeId: d.place_id,
+          name: d.name,
+          rating: d.rating || 0,
+          reviews: d.user_ratings_total || 0,
+          address: d.formatted_address || "",
+          openNow: (d.opening_hours && typeof d.opening_hours.open_now === "boolean") ? d.opening_hours.open_now : null,
+          website: d.website || "",
+          types: Array.isArray(d.types) ? d.types : [],
+          mapsLink: mapsPlaceLink(d.place_id)
+        };
+      } catch {
+        return null;
+      }
+    });
+
+    // limit to 2 concurrent Place Details calls
+    const itemsRaw = await runWithLimit(2, tasks);
+    const items = itemsRaw.filter(Boolean);
+
+    // 3) Rank by GBP score derived from details (same scoring inputs)
+    const scored = items.map(it => {
+      const dLike = {
+        rating: it.rating,
+        user_ratings_total: it.reviews,
+        types: it.types,
+        opening_hours: { open_now: it.openNow },
+        photos: new Array(Math.round(Math.min(20, (it.reviews || 0) / 10))).fill(0) // proxy if photos absent
+      };
+      const { gbpScore } = scoreGBP(dLike, trade);
+      return { ...it, gbpScore };
+    }).sort((a, b) => b.gbpScore - a.gbpScore)
+      .map((c, i) => ({ ...c, rank: i + 1 }));
+
+    const payload = {
+      ok: true,
+      trade,
+      area,
+      total: scored.length,
+      cached: false,
+      items: scored
+    };
+    cacheSet(cacheKey, payload, COMP_TTL);
+    res.json(payload);
+  } catch (e) {
+    if (!IS_PRODUCTION) console.error("Competitive snapshot error:", e);
+    res.status(500).json({ ok: false, error: "Competitive snapshot failed" });
+  }
+});
+
+// Quiet favicon
+app.get("/favicon.ico", (_req, res) => res.status(204).end());
+
+// Start
 app.listen(PORT, () => {
-  console.log(`Elev8Trades backend running on port ${PORT} [${NODE_ENV}]`);
+  if (!IS_PRODUCTION) console.log(`[dev] Listening on http://localhost:${PORT}`);
 });
