@@ -6,9 +6,6 @@
 
 require("dotenv").config();
 
-// Global fetch polyfill for Node 18 on Render
-global.fetch = (...args) => import("node-fetch").then(m => m.default(...args));
-
 const path = require("path");
 const express = require("express");
 const cors = require("cors");
@@ -22,6 +19,7 @@ const PORT = process.env.PORT || 10000;
 const NODE_ENV = process.env.NODE_ENV || "development";
 const IS_PRODUCTION = NODE_ENV === "production";
 
+// Fail fast if critical server keys are missing
 if (!process.env.GOOGLE_MAPS_API_KEY_SERVER) {
   console.error("FATAL: GOOGLE_MAPS_API_KEY_SERVER secret missing");
   process.exit(1);
@@ -29,6 +27,15 @@ if (!process.env.GOOGLE_MAPS_API_KEY_SERVER) {
 if (!process.env.GOOGLE_MAPS_EMBED_KEY) {
   console.warn("WARN: GOOGLE_MAPS_EMBED_KEY missing — map embed previews will be disabled.");
 }
+
+// Assert native fetch (Node 20+) for maximum reliability under load
+if (typeof fetch !== "function") {
+  console.error(
+    "FATAL: Native fetch not available. Please run on Node 20+ (Render currently uses Node 22)."
+  );
+  process.exit(1);
+}
+
 if (process.env.GEMINI_API_KEY && !IS_PRODUCTION) {
   console.log("[info] Gemini key detected (not used yet).");
 }
@@ -37,45 +44,75 @@ const app = express();
 
 // ===== Security headers (minimal CSP + COEP off to allow Google maps) =====
 app.disable("x-powered-by");
-app.use(helmet({
-  crossOriginEmbedderPolicy: false,
-  contentSecurityPolicy: {
-    useDefaults: true,
-    directives: {
-      "default-src": ["'self'"],
-      "script-src": ["'self'", "'unsafe-inline'"],
-      "style-src": ["'self'", "'unsafe-inline'"],
-      "img-src": ["'self'", "data:", "https:", "https://maps.gstatic.com", "https://maps.googleapis.com"],
-      "frame-src": ["'self'", "https://www.google.com"],
-      "connect-src": ["'self'"]
-    }
-  }
-}));
+app.use(
+  helmet({
+    crossOriginEmbedderPolicy: false,
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        "default-src": ["'self'"],
+        "script-src": ["'self'", "'unsafe-inline'"],
+        "style-src": ["'self'", "'unsafe-inline'"],
+        "img-src": [
+          "'self'",
+          "data:",
+          "https:",
+          "https://maps.gstatic.com",
+          "https://maps.googleapis.com",
+        ],
+        "frame-src": ["'self'", "https://www.google.com"],
+        "connect-src": ["'self'"],
+      },
+    },
+  })
+);
 
 // ===== JSON / Compression =====
 app.use(express.json({ limit: "1mb" }));
 app.use(compression());
+
+// ===== Static assets (serve widget.js, images, etc.) =====
+app.use(
+  express.static(process.cwd(), {
+    index: false,      // we explicitly serve "/" below
+    fallthrough: true,
+    extensions: ["html"]
+  })
+);
 
 // ===== CORS (tight whitelist — replace with your real domain[s]) =====
 const ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
   "https://elev8trades.com",
-  "https://widget.elev8trades.com"
+  "https://widget.elev8trades.com",
 ];
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // server-to-server / curl
-    const ok = ALLOWED_ORIGINS.some(o => origin.startsWith(o));
-    return cb(null, ok);
-  }
-}));
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // server-to-server / curl / same-origin OK
+      const ok = ALLOWED_ORIGINS.some((o) => origin.startsWith(o));
+      return cb(null, ok);
+    },
+  })
+);
 
 // ===== Rate limiting =====
-app.use(rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false }));
-const analyzeLimiter = rateLimit({ windowMs: 60 * 1000, max: 15, standardHeaders: true, legacyHeaders: false });
-// Competitive endpoint limiter (quota-safe)
-const competitorLimiter = rateLimit({ windowMs: 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false });
+app.use(
+  rateLimit({ windowMs: 60 * 1000, max: 60, standardHeaders: true, legacyHeaders: false })
+);
+const analyzeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const competitorLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // ===== Serve widget from root and explicit path (for QR deep-link) =====
 app.get("/", (_req, res) => res.sendFile(path.join(process.cwd(), "widget.html")));
@@ -84,14 +121,21 @@ app.get("/widget.html", (_req, res) => res.sendFile(path.join(process.cwd(), "wi
 // ===== In-memory TTL cache =====
 const _cache = new Map();
 const now = () => Date.now();
-function cacheSet(key, val, ttlMs = 6 * 60 * 60 * 1000) { _cache.set(key, { v: val, exp: now() + ttlMs }); }
+function cacheSet(key, val, ttlMs = 6 * 60 * 60 * 1000) {
+  _cache.set(key, { v: val, exp: now() + ttlMs });
+}
 function cacheGet(key) {
   const hit = _cache.get(key);
   if (!hit) return null;
-  if (hit.exp < now()) { _cache.delete(key); return null; }
+  if (hit.exp < now()) {
+    _cache.delete(key);
+    return null;
+  }
   return hit.v;
 }
-function noCache(req) { return !!req.query?.nocache || !!req.body?.nocache; }
+function noCache(req) {
+  return !!req.query?.nocache || !!req.body?.nocache;
+}
 
 // ===== Google Maps client =====
 const maps = new Client({});
@@ -99,7 +143,9 @@ const MAPS_KEY = process.env.GOOGLE_MAPS_API_KEY_SERVER;
 const EMBED_KEY = process.env.GOOGLE_MAPS_EMBED_KEY;
 
 // ===== Helpers =====
-function trimStr(x) { return String(x || "").trim(); }
+function trimStr(x) {
+  return String(x || "").trim();
+}
 function normalizeUrl(u) {
   if (!u) return "";
   let s = trimStr(u);
@@ -164,9 +210,9 @@ function scoreWebsite(signals, reachable) {
 
 function volumePctFromReviews(reviews) {
   if (reviews >= 100) return 100;
-  if (reviews >= 50)  return 85;
-  if (reviews >= 20)  return 70;
-  if (reviews >= 5)   return 50;
+  if (reviews >= 50) return 85;
+  if (reviews >= 20) return 70;
+  if (reviews >= 5) return 50;
   return 20;
 }
 
@@ -176,23 +222,23 @@ function scoreGBP(details, businessType) {
 
   const rating = details.rating || 0;
   const reviews = details.user_ratings_total || 0;
-  const cats = (details.types || []).map(t => String(t).toLowerCase());
-  const photos = Array.isArray(details.photos) ? details.photos.length : (details.photos || []).length; // fixed
+  const cats = (details.types || []).map((t) => String(t).toLowerCase());
+  const photos = Array.isArray(details.photos) ? details.photos.length : (details.photos || []).length;
   const hasHours = !!(details.opening_hours && typeof details.opening_hours.open_now === "boolean");
 
-  out.ratingPct  = Math.round((rating / 5) * 100);
-  out.volumePct  = volumePctFromReviews(reviews);
+  out.ratingPct = Math.round((rating / 5) * 100);
+  out.volumePct = volumePctFromReviews(reviews);
   const bt = String(businessType || "").toLowerCase().trim();
-  out.categoryPct = bt ? (cats.some(c => c.includes(bt)) ? 100 : 50) : 60;
-  out.photosPct  = Math.max(0, Math.min(100, photos * 5));
-  out.hoursPct   = hasHours ? 80 : 40;
+  out.categoryPct = bt ? (cats.some((c) => c.includes(bt)) ? 100 : 50) : 60;
+  out.photosPct = Math.max(0, Math.min(100, photos * 5));
+  out.hoursPct = hasHours ? 80 : 40;
 
   const gbpScore = Math.round(
     0.35 * out.ratingPct +
-    0.25 * out.volumePct +
-    0.15 * out.categoryPct +
-    0.15 * out.photosPct +
-    0.10 * out.hoursPct
+      0.25 * out.volumePct +
+      0.15 * out.categoryPct +
+      0.15 * out.photosPct +
+      0.1 * out.hoursPct
   );
 
   return { gbpScore, ...out };
@@ -200,21 +246,26 @@ function scoreGBP(details, businessType) {
 
 function mapEmbedUrl(placeId) {
   if (!EMBED_KEY || !placeId) return "";
-  return `https://www.google.com/maps/embed/v1/place?key=${encodeURIComponent(EMBED_KEY)}&q=place_id:${encodeURIComponent(placeId)}`;
+  return `https://www.google.com/maps/embed/v1/place?key=${encodeURIComponent(
+    EMBED_KEY
+  )}&q=place_id:${encodeURIComponent(placeId)}`;
 }
 
 function mapsPlaceLink(placeId) {
-  return `https://www.google.com/maps/search/?api=1&query=Google&query_place_id=${encodeURIComponent(placeId)}`;
+  return `https://www.google.com/maps/search/?api=1&query=Google&query_place_id=${encodeURIComponent(
+    placeId
+  )}`;
 }
 
 // Expand name variants: remove suffixes, prefixes, punctuation
 function expandNameVariants(name) {
   const set = new Set();
-  const cleanTail = (s) => String(s || "")
-    .replace(/[,.\s]+$/g, "")
-    .replace(/^(the|a)\s+/i, "")
-    .replace(/\s*&\s*sons\b/i, "")
-    .trim();
+  const cleanTail = (s) =>
+    String(s || "")
+      .replace(/[,.\s]+$/g, "")
+      .replace(/^(the|a)\s+/i, "")
+      .replace(/\s*&\s*sons\b/i, "")
+      .trim();
   const base = cleanTail(name);
   if (!base) return [];
   set.add(base);
@@ -241,11 +292,12 @@ function nameSimilarity(a, b) {
 async function resolvePlace({ businessName, businessType, serviceArea }, { bypassCache }) {
   const name = trimStr(businessName);
   const area = trimStr(serviceArea);
-  const bt   = trimStr(businessType);
+  const bt = trimStr(businessType);
   if (!name && !area) return { ok: false, status: "NEEDS_INPUT" };
 
   const variants = expandNameVariants(name);
-  const queries = (variants.length ? variants : [name || bt]).map(q => [q, bt || "", area || ""].filter(Boolean).join(" "));
+  const queries = (variants.length ? variants : [name || bt])
+    .map((q) => [q, bt || "", area || ""].filter(Boolean).join(" "));
 
   const cacheKey = `place:${queries.join("|")}`;
   if (!bypassCache) {
@@ -259,7 +311,7 @@ async function resolvePlace({ businessName, businessType, serviceArea }, { bypas
     try {
       const resp = await maps.textSearch({
         params: { key: MAPS_KEY, query: q, region: "us" },
-        timeout: 8000
+        timeout: 8000,
       });
       const results = resp?.data?.results || [];
       for (const r of results) {
@@ -268,10 +320,12 @@ async function resolvePlace({ businessName, businessType, serviceArea }, { bypas
           name: r.name,
           formatted_address: r.formatted_address,
           rating: r.rating,
-          user_ratings_total: r.user_ratings_total
+          user_ratings_total: r.user_ratings_total,
         });
       }
-    } catch { /* continue */ }
+    } catch {
+      /* continue */
+    }
   }
 
   if (candidates.length === 0) {
@@ -281,19 +335,24 @@ async function resolvePlace({ businessName, businessType, serviceArea }, { bypas
   }
 
   // Best candidate: similarity -> strength -> reviews (tie-breaker)
-  const scored = candidates.map(c => ({
+  const scored = candidates.map((c) => ({
     ...c,
     _sim: nameSimilarity(name, c.name),
-    _strength: (c.rating || 0) * 20 + Math.min(100, (c.user_ratings_total || 0))
+    _strength: (c.rating || 0) * 20 + Math.min(100, c.user_ratings_total || 0),
   }));
-  scored.sort((a, b) =>
-    (b._sim - a._sim) ||
-    (b._strength - a._strength) ||
-    ((b.user_ratings_total || 0) - (a.user_ratings_total || 0))
+  scored.sort(
+    (a, b) =>
+      b._sim - a._sim ||
+      b._strength - a._strength ||
+      (b.user_ratings_total || 0) - (a.user_ratings_total || 0)
   );
   const winner = scored[0];
 
-  const out = { ok: true, placeId: winner.placeId, candidates: scored.map(({ _sim, _strength, ...r }) => r) };
+  const out = {
+    ok: true,
+    placeId: winner.placeId,
+    candidates: scored.map(({ _sim, _strength, ...r }) => r),
+  };
   cacheSet(cacheKey, out, 3 * 60 * 60 * 1000);
   return out;
 }
@@ -301,7 +360,8 @@ async function resolvePlace({ businessName, businessType, serviceArea }, { bypas
 // ===== Small concurrency helper =====
 async function runWithLimit(limit, tasks) {
   const results = new Array(tasks.length);
-  let i = 0, active = 0;
+  let i = 0,
+    active = 0;
   return new Promise((resolve) => {
     const next = () => {
       if (i === tasks.length && active === 0) return resolve(results);
@@ -310,9 +370,16 @@ async function runWithLimit(limit, tasks) {
         active++;
         Promise.resolve()
           .then(tasks[idx])
-          .then((val) => { results[idx] = val; })
-          .catch(() => { results[idx] = null; })
-          .finally(() => { active--; next(); });
+          .then((val) => {
+            results[idx] = val;
+          })
+          .catch(() => {
+            results[idx] = null;
+          })
+          .finally(() => {
+            active--;
+            next();
+          });
       }
     };
     next();
@@ -326,23 +393,27 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     env: NODE_ENV,
     hasServerKey: !!process.env.GOOGLE_MAPS_API_KEY_SERVER,
-    hasEmbedKey: !!process.env.GOOGLE_MAPS_EMBED_KEY
+    hasEmbedKey: !!process.env.GOOGLE_MAPS_EMBED_KEY,
   });
 });
 
 app.post("/api/analyze", analyzeLimiter, async (req, res) => {
   try {
     const {
-      businessName, businessType, serviceArea,
-      websiteUrl: rawUrl, placeId: overridePlaceId,
-      fast, siteOnly
+      businessName,
+      businessType,
+      serviceArea,
+      websiteUrl: rawUrl,
+      placeId: overridePlaceId,
+      fast,
+      siteOnly,
     } = req.body || {};
 
-    const bypassCache   = noCache(req);
+    const bypassCache = noCache(req);
     const forceSiteOnly = siteOnly === true || siteOnly === 1;
 
     // Normalize/probe site
-    const siteUrl   = normalizeUrl(rawUrl);
+    const siteUrl = normalizeUrl(rawUrl);
     const siteProbe = siteUrl ? await probeSite(siteUrl) : { ok: false };
 
     // Resolve place unless forced site-only
@@ -352,7 +423,10 @@ app.post("/api/analyze", analyzeLimiter, async (req, res) => {
       if (overridePlaceId) {
         placeId = trimStr(overridePlaceId) || null;
       } else {
-        const resolved = await resolvePlace({ businessName, businessType, serviceArea }, { bypassCache });
+        const resolved = await resolvePlace(
+          { businessName, businessType, serviceArea },
+          { bypassCache }
+        );
         if (resolved.ok) {
           placeId = resolved.placeId;
           candidates = resolved.candidates || [];
@@ -361,7 +435,7 @@ app.post("/api/analyze", analyzeLimiter, async (req, res) => {
             success: false,
             status: "NEEDS_INPUT",
             message: "Pick a candidate or provide a service area.",
-            candidates: resolved.candidates
+            candidates: resolved.candidates,
           });
         }
       }
@@ -375,10 +449,20 @@ app.post("/api/analyze", analyzeLimiter, async (req, res) => {
       if (!details) {
         const d = await maps.placeDetails({
           params: {
-            key: MAPS_KEY, place_id: placeId,
-            fields: ["place_id","name","rating","user_ratings_total","types","opening_hours","photos","website"]
+            key: MAPS_KEY,
+            place_id: placeId,
+            fields: [
+              "place_id",
+              "name",
+              "rating",
+              "user_ratings_total",
+              "types",
+              "opening_hours",
+              "photos",
+              "website",
+            ],
           },
-          timeout: 8000
+          timeout: 8000,
         });
         details = d?.data?.result || null;
         if (details) cacheSet(k, details, 12 * 60 * 60 * 1000);
@@ -386,16 +470,19 @@ app.post("/api/analyze", analyzeLimiter, async (req, res) => {
     }
 
     // Site score (fetch HTML only if reachable and not fast)
-    let siteScore = 0, siteSignals = null;
+    let siteScore = 0,
+      siteSignals = null;
     if (siteUrl && (siteProbe.ok || !fast)) {
-      const htmlRes = (siteProbe.ok && !fast) ? await fetchHtml(siteUrl) : { ok: false };
+      const htmlRes = siteProbe.ok && !fast ? await fetchHtml(siteUrl) : { ok: false };
       siteSignals = htmlRes.ok ? extractSiteSignals(htmlRes.text) : extractSiteSignals("");
       siteScore = scoreWebsite(siteSignals, !!siteProbe.ok);
     }
 
     // GBP score
-    const { gbpScore, ratingPct, volumePct, categoryPct, photosPct, hoursPct } =
-      scoreGBP(details, businessType);
+    const { gbpScore, ratingPct, volumePct, categoryPct, photosPct, hoursPct } = scoreGBP(
+      details,
+      businessType
+    );
 
     // Path / status / final
     let status = "OK";
@@ -404,21 +491,37 @@ app.post("/api/analyze", analyzeLimiter, async (req, res) => {
     let ceiling = false;
 
     if (forceSiteOnly) {
-      status = "SITE_ONLY_FORCED"; path = "SITE_ONLY"; finalScore = siteScore; ceiling = true;
+      status = "SITE_ONLY_FORCED";
+      path = "SITE_ONLY";
+      finalScore = siteScore;
+      ceiling = true;
     } else if (!placeId && siteUrl) {
-      status = "SITE_ONLY"; path = "SITE_ONLY"; finalScore = siteScore; ceiling = true;
+      status = "SITE_ONLY";
+      path = "SITE_ONLY";
+      finalScore = siteScore;
+      ceiling = true;
     } else if (placeId && (!siteUrl || !siteProbe.ok)) {
-      status = "GBP_ONLY"; path = "GBP_ONLY"; finalScore = gbpScore; ceiling = !siteUrl || !siteProbe.ok;
+      status = "GBP_ONLY";
+      path = "GBP_ONLY";
+      finalScore = gbpScore;
+      ceiling = !siteUrl || !siteProbe.ok;
     } else if (placeId && siteUrl) {
-      status = "BLENDED_60_40"; path = "BLENDED_60_40"; finalScore = Math.round(0.60 * gbpScore + 0.40 * siteScore);
+      status = "BLENDED_60_40";
+      path = "BLENDED_60_40";
+      finalScore = Math.round(0.6 * gbpScore + 0.4 * siteScore);
       ceiling = gbpScore < 60 || !siteProbe.ok;
     } else {
-      status = "NEEDS_INPUT"; path = "NEEDS_INPUT"; finalScore = 0;
+      status = "NEEDS_INPUT";
+      path = "NEEDS_INPUT";
+      finalScore = 0;
     }
 
     res.json({
       success: true,
-      status, path, finalScore, ceiling,
+      status,
+      path,
+      finalScore,
+      ceiling,
       rationale:
         status === "SITE_ONLY" || status === "SITE_ONLY_FORCED"
           ? "Provisional website-only score. Add/claim your Google Business Profile to raise the ceiling."
@@ -428,9 +531,17 @@ app.post("/api/analyze", analyzeLimiter, async (req, res) => {
       placeId: placeId || null,
       mapEmbedUrl: placeId ? mapEmbedUrl(placeId) : "",
       candidates,
-      gbp: { gbpScore, ratingPct, volumePct, categoryPct, photosPct, hoursPct,
-             rating: details?.rating || 0, user_ratings_total: details?.user_ratings_total || 0 },
-      site: { siteUrl, reachable: !!siteProbe.ok, siteScore, signals: siteSignals }
+      gbp: {
+        gbpScore,
+        ratingPct,
+        volumePct,
+        categoryPct,
+        photosPct,
+        hoursPct,
+        rating: details?.rating || 0,
+        user_ratings_total: details?.user_ratings_total || 0,
+      },
+      site: { siteUrl, reachable: !!siteProbe.ok, siteScore, signals: siteSignals },
     });
   } catch (err) {
     if (!IS_PRODUCTION) console.error("Analyze error:", err);
@@ -440,20 +551,19 @@ app.post("/api/analyze", analyzeLimiter, async (req, res) => {
 
 /**
  * GET /api/competitive-snapshot
- * Supports two param styles:
- *  A) Main-form style:  ?businessName=...&serviceArea=...&businessType=...
- *  B) Simple style (legacy friendly): ?businessType=...&serviceArea=...   (also accepts trade/area)
+ * Params:
+ *   ?businessName=...&serviceArea=...&businessType=... (preferred)
+ *   or ?businessType=...&serviceArea=... (also accepts ?trade / ?area)
  * Optional: ?nocache=1
- * Returns: { ok, trade, area, total, cached, items:[{rank,name,rating,reviews,types,address,openNow,website,mapsLink,placeId}] }
  */
 app.get("/api/competitive-snapshot", competitorLimiter, async (req, res) => {
   try {
     const businessName = trimStr(req.query.businessName);
-    const serviceArea  = trimStr(req.query.serviceArea || req.query.area);
+    const serviceArea = trimStr(req.query.serviceArea || req.query.area);
     const businessType = trimStr(req.query.businessType || req.query.trade);
 
     const trade = businessType;
-    const area  = serviceArea;
+    const area = serviceArea;
     const bypassCache = !!req.query?.nocache;
 
     if (!trade || !area) {
@@ -473,77 +583,87 @@ app.get("/api/competitive-snapshot", competitorLimiter, async (req, res) => {
     const searchQuery = `${trade} in ${area}`;
     const ts = await maps.textSearch({
       params: { key: MAPS_KEY, query: searchQuery, region: "us" },
-      timeout: 10000
+      timeout: 10000,
     });
     let results = ts?.data?.results || [];
 
     // optional self-exclusion (use similarity to catch variants)
     if (businessName) {
-      results = results.filter(r => nameSimilarity(businessName, r.name || "") < 3);
+      results = results.filter((r) => nameSimilarity(businessName, r.name || "") < 3);
     }
 
-    // map skeletons for initial rank sort
     const ranked = results
-      .map(r => ({
+      .map((r) => ({
         place_id: r.place_id,
         name: r.name,
         rating: r.rating || 0,
         user_ratings_total: r.user_ratings_total || 0,
-        formatted_address: r.formatted_address
+        formatted_address: r.formatted_address,
       }))
-      .sort((a, b) =>
-        (b.rating - a.rating) ||
-        (b.user_ratings_total - a.user_ratings_total)
-      )
+      .sort((a, b) => b.rating - a.rating || b.user_ratings_total - a.user_ratings_total)
       .slice(0, MAX_COMPETITORS);
 
     // 2) Enrich details with concurrency limit
-    const tasks = ranked.map(r => async () => {
+    const tasks = ranked.map((r) => async () => {
       try {
         const det = await maps.placeDetails({
           params: {
             key: MAPS_KEY,
             place_id: r.place_id,
             fields: [
-              "place_id","name","rating","user_ratings_total","formatted_address",
-              "opening_hours","website","types","photos"
-            ]
+              "place_id",
+              "name",
+              "rating",
+              "user_ratings_total",
+              "formatted_address",
+              "opening_hours",
+              "website",
+              "types",
+              "photos",
+            ],
           },
-          timeout: 8000
+          timeout: 8000,
         });
         const d = det?.data?.result || {};
+        const photosCount = Array.isArray(d.photos) ? d.photos.length : 0;
+
         return {
           placeId: d.place_id,
           name: d.name,
           rating: d.rating || 0,
           reviews: d.user_ratings_total || 0,
           address: d.formatted_address || "",
-          openNow: (d.opening_hours && typeof d.opening_hours.open_now === "boolean") ? d.opening_hours.open_now : null,
+          openNow:
+            d.opening_hours && typeof d.opening_hours.open_now === "boolean"
+              ? d.opening_hours.open_now
+              : null,
           website: d.website || "",
           types: Array.isArray(d.types) ? d.types : [],
-          mapsLink: mapsPlaceLink(d.place_id)
+          photosCount,
+          mapsLink: mapsPlaceLink(d.place_id),
         };
       } catch {
         return null;
       }
     });
 
-    // limit to 2 concurrent Place Details calls
     const itemsRaw = await runWithLimit(2, tasks);
     const items = itemsRaw.filter(Boolean);
 
-    // 3) Rank by GBP score derived from details (same scoring inputs)
-    const scored = items.map(it => {
-      const dLike = {
-        rating: it.rating,
-        user_ratings_total: it.reviews,
-        types: it.types,
-        opening_hours: { open_now: it.openNow },
-        photos: new Array(Math.round(Math.min(20, (it.reviews || 0) / 10))).fill(0) // proxy if photos absent
-      };
-      const { gbpScore } = scoreGBP(dLike, trade);
-      return { ...it, gbpScore };
-    }).sort((a, b) => b.gbpScore - a.gbpScore)
+    // 3) Rank by GBP score (from actual details)
+    const scored = items
+      .map((it) => {
+        const dLike = {
+          rating: it.rating,
+          user_ratings_total: it.reviews,
+          types: it.types,
+          opening_hours: { open_now: it.openNow },
+          photos: new Array(it.photosCount || 0).fill(0),
+        };
+        const { gbpScore } = scoreGBP(dLike, trade);
+        return { ...it, gbpScore };
+      })
+      .sort((a, b) => b.gbpScore - a.gbpScore)
       .map((c, i) => ({ ...c, rank: i + 1 }));
 
     const payload = {
@@ -552,7 +672,7 @@ app.get("/api/competitive-snapshot", competitorLimiter, async (req, res) => {
       area,
       total: scored.length,
       cached: false,
-      items: scored
+      items: scored,
     };
     cacheSet(cacheKey, payload, COMP_TTL);
     res.json(payload);
