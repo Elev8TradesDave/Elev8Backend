@@ -4,17 +4,18 @@
   "private": true,
   "description": "Elev8Trades Local Visibility Audit — Render-friendly Node/Express backend + widget",
   "main": "api/server.js",
+  "engines": { "node": ">=20" },
   "scripts": {
     "start": "node api/server.js",
     "dev": "NODE_ENV=development node api/server.js"
   },
   "dependencies": {
     "@googlemaps/google-maps-services-js": "^3.3.52",
+    "compression": "^1.7.4",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
     "express-rate-limit": "^7.4.0",
-    "helmet": "^7.1.0",
-    "node-fetch": "^3.3.2"
+    "helmet": "^7.1.0"
   }
 }
